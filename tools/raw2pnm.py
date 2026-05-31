@@ -44,7 +44,7 @@ def render(args):
     maxval = 65535 if is16 else 255
     magic = "P6" if is_rgb else "P5"
 
-    if args.transpose or args.rotate or args.resize or args.planar:
+    if args.transpose or args.rotate or args.resize or args.planar or args.invert:
         # The scan's line axis is across the film and the line-count axis is
         # along it (and the across axis is oversampled), so a frame comes out
         # sideways and stretched. Color is planar: each line is N concatenated
@@ -73,6 +73,8 @@ def render(args):
             xi = np.arange(tw) * a.shape[1] // tw
             a = a[yi][:, xi]                              # nearest-neighbour
 
+        if args.invert:                    # film is a negative
+            a = maxval - a
         color = (a.ndim == 3)
         a = np.ascontiguousarray(a)
         oh, ow = a.shape[0], a.shape[1]
@@ -168,6 +170,8 @@ def main():
     ap.add_argument("--planar", type=int, metavar="N",
                     help="treat each --width line as N concatenated planes and "
                          "build an RGB image (N=3 for planar R,G,B color)")
+    ap.add_argument("--invert", action="store_true",
+                    help="invert samples (film negatives); gray modes")
     ap.add_argument("-o", "--out", default="scan.pnm")
     ap.add_argument("--guess-stride", action="store_true")
     ap.add_argument("--sample", type=int, default=8 << 20,
