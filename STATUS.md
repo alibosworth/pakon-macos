@@ -7,21 +7,56 @@ guide. This file is the short "where we left off" snapshot.
 _Last updated: 2026-05-31._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
-code and pulled **239,984,640 image bytes** (4-frame COLOR strip, scan res
-3000x2000/frame, 11719 reads, 2 late errors). **Image format (decoding):**
-- row stride **16000 bytes** (autocorr peak + 2x harmonic), **16-bit LE**,
-- **COLOR, planar**: 8000 samples/line doesn't divide by 3, so each line is
-  concatenated planes (hypothesis: R|G|B ≈ 2666 each + pad). Confirm by whether
-  a gray render @ width 8000 shows the scene 3× side-by-side.
-- ribbon rotated 90°, and pixels are non-square (across-sensor oversampled vs
-  motor step) — Pakon's own output is 3000x2000/frame, so resample to that.
-- ~14999 lines total ⇒ ~3750 lines/frame.
-- `tools/raw2pnm.py` now supports `--planar N` (split line into N planes → RGB),
-  `--rotate {90,180,270}`, `--resize WxH`. Try:
-  `raw2pnm.py scan.raw --mode gray16le --width 8000 --offset 40000000 --lines 3750 --planar 3 --rotate 90 --resize 3000x2000 -o frame.pnm`
+code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
+2 late errors). Sample under analysis: `/Volumes/Video/scan.raw`.
 
-TODO: confirm planar layout + plane width/padding + channel order (RGB vs BGR);
-frame-boundary detection (gaps); wrap to TIFF/PNG. Then Phase 6 (SANE backend).
+**Image layout — CONFIRMED interleaved (not planar):**
+- **16-bit LE**, line stride **8000 samples / 16000 bytes** (autocorr peak +
+  2x harmonic), ~**14999 lines**.
+- **Per-pixel interleaved RGB** (`R,G,B,R,G,B…`), NOT plane-sequential. Proven
+  on `scan.raw`: column autocorrelation peaks at lag 3/6/9 (interleave
+  fingerprint, lag3 ≈ 1.58× lag1); deinterleave-then-correlate gives high,
+  balanced channel correlation (R~G .59 / R~B .90 / G~B .56) while a planar
+  split collapses (one "channel" anti-correlates, −0.08). This **supersedes the
+  earlier planar hypothesis** in old commits / `raw2pnm.py --planar`.
+- 8000 isn't a multiple of 3, so the working model is **2 padding samples per
+  line and RGB restarts at R each line → 2666 px wide** (`(8000//3)` triples).
+  ⚠️ see OPEN Q1 — this per-line phase reset is the suspected cause of ghosting.
+- Channel order **RGB**: the orange film base at col 0 reads R≈27k / G,B≈5k.
+- Ribbon comes out rotated 90°; 4 frames stacked along the long (line) axis.
+
+**Anatomy of `scan.raw`** (rows, from `autocrop`): dark leader 0–513; **blank
+pre-load scan** ~514–1950 (light through no film — captured before the strip
+was loaded, bright + colour-neutral); **film / 4 frames 1951–14825**; blank
+tail; uniform gate margin at cols ~2050–2666; orange-base sliver at col 0.
+
+**`tools/pakon_image.py` (committed `ea51cc0`)** decodes interleaved RGB →
+16-bit RGB TIFF(s). `--autocrop` (default) trims leader/blank-scan/tail/margin
+(dark rows; bright+neutral rows; low-detail columns) → on this scan rows
+1925–14868, cols 1–1999. `--frames N` splits along the ribbon **before** rotate;
+`--rotate {90,180,270}` per frame; `--invert` is a LINEAR preview only.
+Run: `pakon_image.py scan.raw --rotate 90 --frames 4` → four 3236×1999 negs.
+
+**OPEN QUESTIONS (next, raised 2026-05-31 from the rendered output):**
+- **Q1 — RGB ghosting / channel misregistration.** Decoded frames show colour
+  ghosting → channels likely not aligned. The per-line "pad 2 + restart at R"
+  model may be wrong: if RGB triples run *continuously* across line breaks (no
+  per-line reset), our reshape misaligns channels by a drifting phase. TODO:
+  cross-correlate channels to measure the true per-line phase / sub-sample
+  offset; test continuous-triple vs per-line-reset deinterleave; find the real
+  stride/pad (candidates near 7998/8001 = multiples of 3).
+- **Q2 — colours are very magenta AND the rebate/leader renders BLACK.** In a
+  transmission scan, clear film (rebate/leader) passes the most light and should
+  be the BRIGHTEST, not black. Black rebate ⇒ value tracks *density*, not
+  transmission ⇒ **the stream appears to be already inverted** (or log-density)
+  rather than a raw negative. This would explain the magenta cast and means our
+  `--invert` semantics and the "raw negative for C-41 software" assumption need
+  rethinking. TODO: confirm the photometric sense from the rebate/leader values
+  and from a known clear vs dense region; decide the correct invert/no-invert.
+
+TODO after Q1/Q2: frame-boundary auto-detection (gaps); pixels may be non-square
+(across-sensor oversampled vs motor step) — Pakon's own output is 3000×2000/
+frame, so resampling may be wanted. Then Phase 6 (SANE backend).
 
 ## Phase status
 

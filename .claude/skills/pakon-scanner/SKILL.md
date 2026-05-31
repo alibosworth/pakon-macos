@@ -170,9 +170,23 @@ propagates to test binaries with correct search dirs.
     [--image OUT]` replays ops and writes `0x86` to a raw image file.
   - We drive the scan ourselves and read `0x86`, so the host-usbmon image-data
     gap (usbfs passthrough drops large bulk-IN payloads) does NOT block us.
-  - **Run needs: operational f135 on the host + FILM LOADED.** Then decode
-    geometry/bit-depth/frame boundaries from the raw image. A poll-until-ready
-    state machine is the robust follow-up to verbatim replay.
+  - **Ran on hardware:** pulled 239,984,640 image bytes (4-frame color strip).
+    Sample under analysis on the Mac: `/Volumes/Video/scan.raw`.
+- **Image decoding — layout CONFIRMED interleaved** (see docs/PROTOCOL.md +
+  STATUS.md). 16-bit LE, line stride 8000 samples (16000 B), ~14999 lines,
+  **per-pixel interleaved RGB** (lag-3/6/9 autocorrelation; planar split
+  anti-correlates) ⇒ 2666 px wide, order RGB, ribbon rotated 90°, 4 frames along
+  the line axis. **This supersedes the old plane-sequential guess** (`raw2pnm.py
+  --planar`); `tools/pakon_image.py` is the correct decoder. `--autocrop`
+  (default) strips leader + blank no-film pre/post scan + gate margin.
+  - **TWO OPEN QUESTIONS (next):** (Q1) RGB **ghosting** ⇒ channels likely
+    misregistered; the per-line "pad 2 / restart at R" model may be wrong
+    (triples may run continuously) — measure the true per-line phase. (Q2) the
+    **rebate/leader renders BLACK** though clear film should be brightest in a
+    transmission scan ⇒ the stream looks **already inverted** (value ∝ density),
+    which also explains the magenta cast — confirm the photometric sense and the
+    correct invert/no-invert before trusting colour.
+  - A poll-until-ready state machine is the robust follow-up to verbatim replay.
 
 ## Dev / sync workflow
 

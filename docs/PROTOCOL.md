@@ -171,10 +171,36 @@ From the device-13 4-frame scan capture, the phases are:
 - `01 03 <addr> <reg> <p>` — read a register.
 - `02 <n> <addr> <len> <reg> <data…>` — write register(s).
 
-### Image format — UNKNOWN (need geometry/bit-depth)
+### Image format — partly DECODED (from our own `0x86` capture)
 
-Chunk size is 20480 bytes; total ~240 MB / 4 frames ⇒ ~60 MB/frame (raw,
-uncompressed; likely full-res multi-channel). Exact geometry/bit-depth/frame
-boundaries TBD — best obtained by driving a scan ourselves and reading `0x86`
-(or an in-VM USBPcap capture). Note: film is **motor-fed whole rolls** — design
-CANCEL to let the feed finish, not hard-abort.
+Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
+4 frames. Decoded from `/Volumes/Video/scan.raw` (see `tools/pakon_image.py`):
+
+- **16-bit little-endian** samples; line stride **8000 samples / 16000 bytes**
+  (autocorrelation peak at 8000 + 16000 harmonic); ~14999 lines.
+- **Per-pixel interleaved RGB** (`R,G,B,R,G,B…`) — NOT plane-sequential.
+  Evidence: column autocorrelation peaks at lag 3/6/9 (lag3 ≈ 1.58× lag1);
+  deinterleaving gives balanced channel correlation (R~G .59 / R~B .90 /
+  G~B .56) whereas a planar split anti-correlates one "channel" (−0.08). This
+  **supersedes** the earlier plane-sequential guess (old `raw2pnm.py --planar`).
+- Working geometry: 8000 ∤ 3, so model = **2 pad samples/line, RGB restarts at
+  R each line ⇒ 2666 px wide** (unconfirmed — see Open Q1).
+- **Channel order RGB**: the orange film base at col 0 reads R≈27k / G,B≈5k.
+- Ribbon is rotated 90°; the **4 frames lie along the long (line) axis**.
+- Structure along the ribbon: dark leader, then a **blank "no-film" scan** (the
+  feed runs before the strip loads — bright + colour-neutral), then the 4
+  frames, then a blank tail; plus a uniform **gate margin** on one side (cols
+  ~2050+) and an orange-base sliver at col 0. `pakon_image.py --autocrop`
+  isolates the film.
+
+**OPEN — photometric/alignment questions (2026-05-31), see STATUS.md:**
+- **Q1 ghosting:** decoded frames show RGB ghosting ⇒ channels may be
+  misregistered; the per-line pad/reset model may be wrong (triples might run
+  continuously across line breaks). Need to measure the true per-line phase.
+- **Q2 sense:** the rebate/leader renders **black**, but clear film should be
+  the *brightest* in a transmission scan ⇒ the stream looks **already inverted**
+  (value ∝ density), which would also explain the magenta cast. The correct
+  invert/no-invert and "raw negative" assumption need confirming.
+
+Note: film is **motor-fed whole rolls** — design CANCEL to let the feed finish,
+not hard-abort.
