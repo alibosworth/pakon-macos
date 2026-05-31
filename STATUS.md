@@ -175,9 +175,20 @@ raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
   analyze_capture.py` parses pcapng natively. Captures live on the Linux box;
   the scan capture was copied to this Mac at `/Volumes/Video/pakon_scan.pcapng`
   (the firmware-only one at `/Volumes/Video/pakon_full.pcapng`).
-- **Phase 5 (scan state machine + image):** DONE and **VALIDATED ON HARDWARE**
-  (Linux + macOS). `pakon_replay --scan` drives a real scan; `pakon_image.py`
-  decodes the output to 16-bit RGB TIFFs with registration and autocrop.
+- **Phase 5 (scan + image):** **VALIDATED ON HARDWARE** (Linux + macOS) via
+  **verbatim replay** — `pakon_replay --scan scan_fullroll.pakscan` scans a full
+  roll, stops the scanner cleanly, and leaves the device healthy (a following
+  `advance` works). `pakon_image.py` decodes the output to 16-bit RGB.
+  - **Verbatim is the working path.** It replays every captured command in order,
+    including the periodic main-scan housekeeping writes (`0103201e90`,
+    `02052002060020`, per-frame `0206..` exposure writes) and the teardown tail.
+    Limitation: it fits a roll the **same length** as the capture.
+  - **`--scan-sm` (length-independent poll loop) STALLS on hardware.** After
+    takeover it only reads `0x86` + re-arms on empty, discarding the housekeeping
+    writes — and without them the readout never streams (film feeds through,
+    `0x86` stays empty). Making it length-independent needs the **cadence** of
+    those housekeeping commands reverse-engineered (when the device expects each),
+    best done from a capture. Until then, prefer verbatim `--scan`.
 - **Phase 6 (Swift macOS app):** not started. **Current priority.**
 - **Phase 7 (SANE backend / Linux), 8 (hardening):** not started.
 
