@@ -236,13 +236,23 @@ def main():
             lines = fh.readlines()
         recs = parse_tshark_tsv(lines) if fmt == "tsv" else parse_usbmon_text(lines)
 
+    # Inventory of (bus, device) before filtering — helps pick --device, since
+    # the device number changes on every re-enumeration (e.g. across an
+    # f235->f135 firmware reload).
+    inv = Counter((r.bus, r.dev) for r in recs)
+    print("# bus/device inventory (URB counts):")
+    for (bus, dev), cnt in sorted(inv.items(),
+                                  key=lambda kv: (-kv[1], kv[0])):
+        print(f"#   bus {bus} device {dev}: {cnt}")
+    print()
+
     if args.bus is not None:
         recs = [r for r in recs if r.bus == args.bus]
     if args.device is not None:
         recs = [r for r in recs if r.dev == args.device]
 
     if not recs:
-        sys.exit("no matching URBs (check --bus/--device against lsusb)")
+        sys.exit("no matching URBs (check --bus/--device against the inventory)")
 
     print(f"# {len(recs)} URBs"
           + (f" (bus {args.bus})" if args.bus is not None else "")
