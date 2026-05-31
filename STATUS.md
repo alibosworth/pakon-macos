@@ -7,13 +7,20 @@ guide. This file is the short "where we left off" snapshot.
 _Last updated: 2026-05-31._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
-code and pulled **239,984,640 image bytes** (4-frame strip, 11719 reads, only 2
-late transfer errors). Next: decode geometry → render `scan.raw`. Use
-`tools/raw2pnm.py` (`--guess-stride` to find bytes/line via numpy autocorrelation,
-or `--width N` to render an 8-bit-gray band and eyeball alignment). Geometry
-hints from CONFIGURE: PICM reg writes incl. values ~3098 / ~2043 (candidate
-width/height); chunk size 20480. Determine channels (likely RGB) + bit depth
-(8 or 16) from the working stride.
+code and pulled **239,984,640 image bytes** (4-frame B&W strip, 11719 reads, 2
+late errors). **Image format DECODED** (via tools/raw2pnm.py):
+- row stride 16000 bytes (autocorr peak + 2x harmonic), **16-bit little-endian**,
+- **single-channel grayscale** (this was a B&W scan; 8000 samples/line, which is
+  why it doesn't divide by 3 — no color planes),
+- **8000 px wide** (across film) × ~14999 lines (along film) ⇒ ~3750 lines/frame,
+- the ribbon is rotated 90° → render upright with `--transpose`.
+- View a frame:
+  `raw2pnm.py scan.raw --mode gray16le --width 8000 --offset 40000000 --lines 3750 --transpose -o frame.pnm`
+
+TODO: pixel aspect (cross-sensor vs motor-step res may be non-square — confirm
+vs Pakon's reported dimensions), frame-boundary detection (gaps between frames),
+and wrap to TIFF/PNG. Also still need a COLOR scan capture to decode the color
+(planar?) layout. Then Phase 6 (SANE backend).
 
 ## Phase status
 
