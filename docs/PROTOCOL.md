@@ -88,59 +88,65 @@ Algorithm not yet derived. Will be reverse-derived and hard-validated against
 known-good sample packets, e.g. the open packet `04 03 10 00 85`, before it is
 trusted for scan commands.
 
-## Open handshake (documented sequence, to replay in Phase 3)
+## Endpoints — CONFIRMED from scan capture (operational `0F05:F135`)
+
+The operational `f135` device exposes interface 0, **single setting, 3 bulk
+endpoints** (this is the "3 endpoints" the original note referred to):
+
+| Endpoint | Dir | Role (confirmed) |
+|----------|-----|------------------|
+| `0x01`   | OUT | **command** channel (host → device) |
+| `0x81`   | IN  | **command reply / status** (device → host) |
+| `0x86`   | IN  | **image stream** (bulk image data) |
+
+From the 4-frame scan capture (device 13): `BULK OUT 0x01` and `BULK IN 0x81`
+= **2218 exchanges** each (one reply per command); `BULK IN 0x86` = **11719**
+transfers (the image). So a command is: write a frame on `0x01`, read the reply
+on `0x81`; image bytes stream from `0x86`.
+
+> The earlier 6-endpoint / 4-alt-setting map was the **`f235` bootstrap**
+> descriptor (and is why `--probe-open` NAK'd — the bootstrap implements no app
+> protocol). The operational `f135` is the simple 3-endpoint device above.
+
+## Command frame — CONFIRMED wire format
+
+`[type][count][count data bytes]` — the on-wire length is **`2 + count`**, NOT
+padded to 36 (the 36 is only the max in-memory struct). `data[0]` is the
+address byte. Examples from the capture:
 
 ```
-host -> 04 03 10 00 85        ; open
-dev  <- 07 02 10 00           ; expect
-host -> 02 04 10 01 8f 00     ; (next exchange)
-...                           ; drive to Idle
+04 03 10 00 85       type=04 count=3 data=[10(AD_HOST) 00 85]
+07 02 10 00          type=07 count=2 data=[10 00]  (reply; data[1]=status)
+04 03 44 00 00       query AD_PICM_PLUS  -> 07 02 44 01  (present)
+04 03 24 00 00       query AD_PICM       -> 07 02 24 00
 ```
 
-## Endpoints — observed (warm `0F05:F235`, an F-135 unit)
+Note the `0x85` in the open packet is a **command/parameter byte, not a
+checksum** (the analogous `04 03 44 00 00` ends in `00`). Checksum (if any) is
+TBD from the full 2218-command sample set in the capture.
 
-Interface 0 with **4 alternate settings** (alt 0 is the empty FX2 default).
-Physical endpoints are the standard Cypress FX2 set: EP1, EP2, EP4, EP6, EP8.
-Full map (from `pakon_probe`):
+## Open handshake — CONFIRMED (replay verbatim in Phase 3)
 
-| Alt | Endpoints |
-|----:|-----------|
-| 0   | (none — default empty alt setting) |
-| 1   | 0x01 OUT bulk/512, 0x81 IN bulk/512, 0x02 OUT bulk/512, 0x04 OUT bulk/512, 0x86 IN bulk/512, 0x88 IN bulk/512 |
-| 2   | 0x01 OUT int/64, 0x81 IN int/64, 0x02 OUT int/512, 0x04 OUT bulk/512, 0x86 IN int/512, 0x88 IN bulk/512 |
-| 3   | 0x01 OUT int/64, 0x81 IN int/64, 0x02 OUT iso/512, 0x04 OUT bulk/512 |
+Observed on EP1, exactly matching the documentation:
 
-Note: this contradicts the older "3 endpoints" note — that was approximate.
+```
+host(0x01) -> 04 03 10 00 85       dev(0x81) <- 07 02 10 00
+host(0x01) -> 02 04 10 01 8f 00    dev(0x81) <- 07 02 10 00
+host(0x01) -> 04 03 44 00 00       dev(0x81) <- 07 02 44 01   ; probe PICs...
+... (probes AD_PICM_PLUS 0x44, AD_BOOT_PICM_PLUS 0x46, AD_PICM 0x24, etc.)
+```
 
-### Working hypothesis (NOT yet confirmed — confirm in Phase 2/3)
+## Parameter/calibration read — control `0xA4`/`0xA9` (Phase 5)
 
-- **EP1 `0x01`/`0x81`** = command/status channel. It is 64-byte in alts 2/3,
-  comfortably holding the documented 36-byte frame, and matches the Windows
-  36-byte IOCTL packet exchange.
-- **EP2/EP4 OUT** = host→device bulk (commands / scan setup / bulk out).
-- **EP6/EP8 IN** = device→host, i.e. the **image stream** (high-volume bulk).
-- **Which alt setting the driver selects is unknown.** alt 1 (all bulk) is the
-  simplest candidate; alts 2/3 add interrupt/iso variants.
+After the EP1 probe, the driver reads a structured block via EP0 vendor control:
+`0xA4` (OUT trigger, `wValue=0x00A5`, `wIndex=0x1234`, no data) paired with
+`0xA9` (IN read) pulling **32-byte chunks at increasing offsets** (0x00, 0x08,
+0x28, 0x48, …). Looks like a calibration/parameter table. 16 such pairs in the
+capture. To be decoded in Phase 5.
 
-### Empirical result (`pakon_probe --probe-open`, warm F-235)
+## Scan path — partially mapped (Phase 5)
 
-Sending the documented 36-byte open packet to **every OUT endpoint in every alt
-setting (1–3) NAKs** — `libusb_bulk/interrupt_transfer` times out with 0 bytes
-moved, every time. This is device-side (run as root; claim + set-alt both
-succeed; a permission fault would be ACCESS, not a timeout). Conclusions:
-
-- The bulk/interrupt OUT FIFOs are **not armed** by raw writes — the device
-  needs an initialization step first.
-- The 36-byte command protocol is therefore **not raw bulk**. Most likely it is
-  carried over **EP0 vendor control transfers** (consistent with the original
-  Windows driver using an IOCTL to exchange 36-byte structs), and/or a control
-  "start"/arm precedes any bulk image traffic.
-- The required request codes / init sequence are **undocumented and must not be
-  guessed** (project rule). **→ Discover them from a real capture (Phase 4).**
-
-## Scan path — **UNKNOWN (Phase 4-5)**
-
-Calibration, frame detection, and the bulk image-stream format are undocumented
-and must be discovered from our own Windows captures (Phase 4) and modeled as a
-state machine (Phase 5): `OPEN → CONFIGURE → CALIBRATE → SCAN_FRAMES →
-READ_IMAGE → DONE`, with `CANCEL` transitions.
+Open + PIC-probe + parameter read are now known (above). Still to decode from
+the capture: the configure/scan-start commands on EP1, and the **image-stream
+format** on `0x86` (geometry, bit depth, frame boundaries). Model as a state
+machine: `OPEN → CONFIGURE → CALIBRATE → SCAN_FRAMES → READ_IMAGE → DONE`.

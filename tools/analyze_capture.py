@@ -286,16 +286,25 @@ def decode_setup(s):
 
 
 def decode_pakon_frame(data):
-    """Decode a 36-byte (or close) Pakon command/response frame header."""
-    if len(data) < 4:
+    """Decode a Pakon command/response frame, or None if it isn't one.
+
+    Observed wire framing: [type][count][count data bytes], so a real frame is
+    exactly 2 + count bytes. That self-consistency check cleanly distinguishes
+    EP1 command frames from image data and the 0xA9 control reads.
+    """
+    if len(data) < 2:
         return None
-    typ, count, b2, b3 = data[0], data[1], data[2], data[3]
-    addr = ADDR.get(b2, f"0x{b2:02x}")
-    note = f"PAKON type=0x{typ:02x} count={count} addr={addr}"
-    # In a scanner->host reply the status is the byte after the address.
-    if b3 in STATUS:
-        note += f" status?={STATUS[b3]}"
-    return note
+    typ, count = data[0], data[1]
+    if len(data) != 2 + count:
+        return None
+    parts = [f"type=0x{typ:02x}", f"count={count}"]
+    if count >= 1:
+        a = data[2]
+        parts.append(f"addr={ADDR.get(a, f'0x{a:02x}')}")
+    if count >= 2:
+        st = data[3]   # reply status byte (data[1] of payload)
+        parts.append(f"st={STATUS.get(st, f'0x{st:02x}')}")
+    return "PAKON " + " ".join(parts)
 
 
 def main():
@@ -377,12 +386,9 @@ def main():
         elif r.urb != "C":
             combos[(r.ttype, r.direction, r.ep)] += 1
         if r.data:
-            # Decode a Pakon frame only for vendor control transfers or an
-            # exact 36-byte bulk/interrupt payload — never USB descriptors or
-            # bulk image data.
-            cmdish = _is_vendor(eff_setup) or \
-                (r.ttype in ("BULK", "INTR") and len(r.data) == 36)
-            frame = decode_pakon_frame(r.data) if cmdish else None
+            # decode_pakon_frame() self-validates (len == 2 + count), so it
+            # only annotates real command frames, not image data / 0xA9 reads.
+            frame = decode_pakon_frame(r.data)
             shown = r.data[:args.max_data].hex(" ")
             more = "…" if len(r.data) > args.max_data else ""
             detail += (("  " if detail else "")
@@ -404,4 +410,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # downstream (head/less) closed the pipe; exit quietly
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass

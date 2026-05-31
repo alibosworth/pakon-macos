@@ -132,9 +132,22 @@ propagates to test binaries with correct search dirs.
     reset + `0xA4 wValue=0x00A1` renumerate (see docs/PROTOCOL.md). The
     operational descriptor is the clean 3-endpoint one (0x01 OUT, 0x81 IN,
     0x86 IN bulk).
-  - **Still needed:** a capture containing an ACTUAL SCAN on the f135 device —
-    the first capture only caught firmware load + re-enumeration, no command/
-    scan traffic. That capture unblocks Phase 3 (open handshake) and Phase 5.
+  - **Scan capture decoded (the big one).** Operational `f135` = interface 0,
+    3 bulk endpoints: **`0x01` OUT = command, `0x81` IN = reply/status,
+    `0x86` IN = image stream**. Command frame wire format = `[type][count][data]`,
+    length **2+count** (NOT padded to 36). **Open handshake confirmed** on EP1,
+    verbatim per docs (`04 03 10 00 85`→`07 02 10 00`; `02 04 10 01 8f 00`→…;
+    then PIC probes `04 03 <addr> 00 00`). The `0x85` is a param byte, not a
+    checksum. A control `0xA4`/`0xA9` pair reads a 32-byte-chunked calibration/
+    param table. See docs/PROTOCOL.md for all of it.
+- **Next: Phase 3.** Implement the framing (wire = 2+count) + `pakon_cmd` over
+  EP1 bulk (write `0x01`, read `0x81`) + `pakon_replay --open` replaying the
+  captured open sequence verbatim. Then derive the checksum from the 2218
+  command samples, and map the scan-start + `0x86` image format (Phase 5).
+- **Testing caveat:** to run our code on hardware the device must be in `f135`
+  state AND on the host (not held by the VirtualBox VM). Either implement the
+  `f235→f135` firmware load ourselves (standard FX2, see PROTOCOL.md) or detach
+  from the VM after it loads firmware.
 
 ## Dev / sync workflow
 
