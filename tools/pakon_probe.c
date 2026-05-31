@@ -27,6 +27,7 @@ static void usage(const char *argv0)
         "       %s --raw HEX --out 0xNN [--in 0xNN] [--alt N] [--timeout MS]\n"
         "  (default)            enumerate; if warm, print the endpoint map\n"
         "  --list               dump all USB devices\n"
+        "  --probe-open         sweep all alts/endpoints with the open packet\n"
         "  --load-firmware HEX  download firmware to a cold device  [gated]\n"
         "  --raw HEX            send hex bytes (e.g. 0403100085) on --out\n"
         "  --out 0xNN           OUT endpoint for --raw (required with --raw)\n"
@@ -123,6 +124,79 @@ out:
     return rc;
 }
 
+/*
+ * Auto-sweep: for each alt setting and every OUT/IN endpoint pair present in
+ * it, send the documented 36-byte open packet and look for the expected
+ * 07 02 10 00 reply. Prints a per-combination result and a summary. This is how
+ * we find the command channel without hand-running a matrix over SSH.
+ */
+static int do_probe_open(pakon_ctx *ctx, unsigned timeout)
+{
+    static const uint8_t open_pkt[36] = { 0x04, 0x03, 0x10, 0x00, 0x85 };
+    static const uint8_t expect[4]    = { 0x07, 0x02, 0x10, 0x00 };
+
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open failed: %s\n", pakon_result_str(r));
+        return 1;
+    }
+
+    pakon_endpoint eps[32];
+    size_t n = 0;
+    pakon_usb_endpoints(dev, eps, 32, &n);
+
+    int hits = 0;
+    for (int alt = 1; alt <= 3; alt++) {
+        if (pakon_usb_claim(dev, 0, (uint8_t)alt) != PAKON_OK)
+            continue;
+        printf("\n=== alt setting %d ===\n", alt);
+
+        for (size_t o = 0; o < n; o++) {
+            if (eps[o].altsetting != alt || (eps[o].address & 0x80))
+                continue;                       /* want OUT eps in this alt */
+            uint8_t out_ep = eps[o].address;
+
+            size_t sent = 0;
+            r = pakon_usb_send(dev, out_ep, open_pkt, sizeof(open_pkt),
+                               &sent, timeout);
+            printf("  out 0x%02x: send %s (%zu)\n", out_ep,
+                   pakon_result_str(r), sent);
+            if (r != PAKON_OK)
+                continue;
+
+            for (size_t in = 0; in < n; in++) {
+                if (eps[in].altsetting != alt || !(eps[in].address & 0x80))
+                    continue;                   /* want IN eps in this alt */
+                uint8_t in_ep = eps[in].address;
+
+                uint8_t reply[512];
+                size_t got = 0;
+                r = pakon_usb_recv(dev, in_ep, reply, sizeof(reply), &got,
+                                   timeout);
+                if (r == PAKON_ERR_TIMEOUT && got == 0) {
+                    printf("    in 0x%02x: (no reply)\n", in_ep);
+                    continue;
+                }
+                printf("    in 0x%02x: %zu byte(s): ", in_ep, got);
+                for (size_t i = 0; i < got && i < 16; i++)
+                    printf("%02x ", reply[i]);
+                if (got >= 4 && memcmp(reply, expect, 4) == 0) {
+                    printf(" <== OPEN REPLY MATCH");
+                    hits++;
+                }
+                printf("\n");
+            }
+        }
+        pakon_usb_release(dev);
+    }
+
+    printf("\nsummary: %d endpoint combination(s) returned the expected "
+           "open reply (07 02 10 00)\n", hits);
+    pakon_usb_close(dev);
+    return hits > 0 ? 0 : 1;
+}
+
 /* Best-effort hint to help spot the cold FX2 bootloader in --list output.
  * Diagnostic only — NOT used by any matching/classification logic. */
 static const char *device_hint(unsigned vid, unsigned pid)
@@ -197,9 +271,9 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
     printf("opened %04x:%04x (warm Pakon, PID family %s; PID is firmware-set, "
            "not the physical model)\n", vid, pid, pakon_pid_family(pid));
 
-    pakon_endpoint eps[16];
+    pakon_endpoint eps[32];
     size_t n = 0;
-    r = pakon_usb_endpoints(dev, eps, 16, &n);
+    r = pakon_usb_endpoints(dev, eps, 32, &n);
     if (r != PAKON_OK) {
         fprintf(stderr, "endpoint query failed: %s\n", pakon_result_str(r));
         pakon_usb_close(dev);
@@ -208,7 +282,7 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
 
     printf("%zu endpoint(s) across all interfaces/altsettings:\n", n);
     printf("  if alt  ep    dir  type         max\n");
-    for (size_t i = 0; i < n && i < 16; i++) {
+    for (size_t i = 0; i < n && i < 32; i++) {
         printf("  %2u %3u  0x%02x  %s  %-11s  %u\n",
                eps[i].interface, eps[i].altsetting, eps[i].address,
                (eps[i].address & 0x80) ? "IN " : "OUT",
@@ -222,7 +296,7 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
 
 int main(int argc, char **argv)
 {
-    int want_list = 0;
+    int want_list = 0, want_probe_open = 0;
     const char *firmware_hex = NULL;
     const char *raw_hex = NULL;
     int alt = 1, out_ep = -1, in_ep = -1;
@@ -234,6 +308,8 @@ int main(int argc, char **argv)
             return 0;
         } else if (!strcmp(argv[i], "--list")) {
             want_list = 1;
+        } else if (!strcmp(argv[i], "--probe-open")) {
+            want_probe_open = 1;
         } else if (!strcmp(argv[i], "--load-firmware") && i + 1 < argc) {
             firmware_hex = argv[++i];
         } else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
@@ -264,6 +340,12 @@ int main(int argc, char **argv)
 
     if (want_list) {
         exit_code = do_list(ctx);
+        pakon_usb_exit(ctx);
+        return exit_code;
+    }
+
+    if (want_probe_open) {
+        exit_code = do_probe_open(ctx, timeout);
         pakon_usb_exit(ctx);
         return exit_code;
     }

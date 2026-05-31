@@ -26,7 +26,7 @@
 #define FX2_RAM_MAX     0x4000    /* internal RAM extent for the data path */
 #define FX2_TIMEOUT_MS  2000
 
-#define MAX_ENDPOINTS   16
+#define MAX_ENDPOINTS   32
 
 struct pakon_ctx {
     libusb_context *usb;
