@@ -160,10 +160,19 @@ propagates to test binaries with correct search dirs.
   from a capture.
 - **Testing caveat:** the cold device must be on the HOST, not held by the VM
   (disable the VirtualBox USB filter / shut down the VM first).
-- **Phase 5 TODO:** image bytes are NOT in the host-usbmon capture (usbfs
-  passthrough drops large bulk-IN payloads; `0x86` chunks are 20480 bytes). Need
-  an in-VM USBPcap capture for the image-stream format. Command vocabulary is
-  known: `03 01 10` poll (1605×), `01 03 20/24 01 02` PIC writes, etc.
+- **Phase 5 scan replay IMPLEMENTED (untested on hardware).** Flow mapped:
+  OPEN → PARAM READ (0xA4/0xA9 table) → CONFIGURE (PICL 0x20/PICM 0x24 register
+  writes + `03 01` polls) → SCAN (interleaved polls + `0x86` 20480-byte image
+  reads). Tooling:
+  - `analyze_capture.py --extract-scan OUT.pakscan` → ordered op list
+    (`O <hex>` cmd+reply, `M <n>` image read, `C …` control).
+  - `pakon_usb_control()` generic EP0 transfer; `pakon_replay --scan FILE
+    [--image OUT]` replays ops and writes `0x86` to a raw image file.
+  - We drive the scan ourselves and read `0x86`, so the host-usbmon image-data
+    gap (usbfs passthrough drops large bulk-IN payloads) does NOT block us.
+  - **Run needs: operational f135 on the host + FILM LOADED.** Then decode
+    geometry/bit-depth/frame boundaries from the raw image. A poll-until-ready
+    state machine is the robust follow-up to verbatim replay.
 
 ## Dev / sync workflow
 

@@ -24,8 +24,9 @@ _Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
   analyze_capture.py` parses pcapng natively. Captures live on the Linux box;
   the scan capture was copied to this Mac at `/Volumes/Video/pakon_scan.pcapng`
   (the firmware-only one at `/Volumes/Video/pakon_full.pcapng`).
-- **Phase 5 (scan state machine + image):** NOT started. Blocked on an in-VM
-  USBPcap capture for image bytes (see hardware facts).
+- **Phase 5 (scan state machine + image):** scan operation-replay IMPLEMENTED
+  (`--extract-scan` + `pakon_replay --scan`), not yet run on hardware. We drive
+  the scan ourselves and read `0x86`, so no in-VM image capture needed.
 - **Phase 6 (SANE backend), 7 (hardening):** not started.
 
 ## Confirmed hardware/protocol facts (from real captures)
@@ -82,30 +83,33 @@ sudo ./build/pakon_probe            # warm f135 + endpoints 0x01/0x81/0x86
 sudo ./build/pakon_replay --open    # reaches Idle
 ```
 
-## NEXT: Phase 5 (reproduce a scan, read the image)
+## Phase 5 — scan replay IMPLEMENTED, awaiting hardware run
 
-Scan flow is now mapped (see docs/PROTOCOL.md): OPEN → PARAM READ (0xA4/0xA9) →
-CONFIGURE (PICL/PICM register writes + polls) → SCAN (interleaved status polls +
-`0x86` 20480-byte image reads; ~240 MB / 4 frames). Crucially, **commands are
-interleaved with image reads** (2070 EP1 cmds during streaming), so it's an
-ordered operation loop, not "start then drain".
+Scan flow mapped (docs/PROTOCOL.md): OPEN → PARAM READ (0xA4/0xA9) → CONFIGURE
+(PICL/PICM register writes + polls) → SCAN (interleaved status polls + `0x86`
+20480-byte image reads; ~240 MB / 4 frames; commands interleaved with reads).
 
-Recommended implementation — **operation replay**:
-1. Add `analyze_capture.py --extract-scan OUT.pakscan`: emit the full ordered
-   device-13 operation list — EP1 OUT (bytes), EP1 IN (read+expect), `0x86`
-   IN (read N), `0xA4`/`0xA9` control — like the firmware extractor but for the
-   whole session.
-2. Add `pakon_replay --scan FILE`: replay each operation in order against the
-   device, writing `0x86` payloads to a raw image file. (We can now drive the
-   device, so we get the real image bytes even though the capture lacked them.)
-3. Decode geometry/bit-depth/frame boundaries from the bytes we read.
+Built (operation-replay; no safety gates, per request):
+- `analyze_capture.py --extract-scan OUT.pakscan` — emits the operational
+  device's ordered op list: `O <hex>` (EP1 cmd+reply), `M <n>` (read n image
+  bytes from 0x86), `C ...` (0xA4/0xA9 control). Verified 2218 O / 11719 M / 32 C.
+- `pakon_usb_control()` — generic EP0 control transfer (for 0xA4/0xA9).
+- `pakon_replay --scan FILE [--image OUT]` — replays each op, writing `0x86`
+  payloads to a raw image file (default pakon_scan.raw). Image-read timeout 5 s.
 
-Caution: film is motor-fed whole rolls → **load film before --scan**, and
-design CANCEL to let the feed finish (don't hard-abort mid-roll). This step is
-big and hardware-risky; give it a dedicated pass.
+### NEXT: run it on hardware (LOAD FILM FIRST)
 
-Alternatively: build the proper state machine (poll-until-ready instead of
-verbatim poll counts) rather than pure replay — more robust, more work.
+```sh
+git pull origin main && cmake --build build
+python3 tools/analyze_capture.py /tmp/pakon_scan.pcapng --extract-scan scan.pakscan
+# device must be operational f135 on the host (firmware-load first if it's f235)
+# LOAD FILM, then:
+sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw
+```
+Then inspect `scan.raw` size/structure to decode geometry/bit-depth/frame
+boundaries. Verbatim replay mirrors the known-good driver sequence; watch/listen
+to the transport. A poll-until-ready state machine is the more robust follow-up
+(vs verbatim poll counts).
 
 ## Handy commands
 

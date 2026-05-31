@@ -81,7 +81,7 @@ def _intish(s):
 
 class Rec:
     __slots__ = ("ts", "ttype", "direction", "bus", "dev", "ep", "urb",
-                 "setup", "data", "urbid")
+                 "setup", "data", "urbid", "urb_len")
 
     def __init__(self):
         self.ts = 0.0
@@ -94,6 +94,7 @@ class Rec:
         self.setup = None     # dict for control submits
         self.data = b""
         self.urbid = None     # pairs a submit (S) with its completion (C)
+        self.urb_len = None   # URB transfer length (e.g. requested bulk-IN size)
 
 
 def _is_vendor(setup):
@@ -209,6 +210,7 @@ def _usbmon_record(data, hdrlen, end):
     ts_sec = struct.unpack(end + "q", data[16:24])[0]
     ts_usec = struct.unpack(end + "i", data[24:28])[0]
     r.ts = ts_sec + ts_usec / 1e6
+    r.urb_len = struct.unpack(end + "I", data[32:36])[0]   # URB length field
     len_cap = struct.unpack(end + "I", data[36:40])[0]
     # setup packet (8 bytes at offset 40) is valid when flag_setup == 0; USB
     # setup fields are little-endian on the wire.
@@ -348,6 +350,49 @@ def extract_firmware(recs, path, fw_device=None):
                                       for k, v in sorted(reqs.items())))
 
 
+def extract_scan(recs, path, scan_device=None):
+    """Write the operational device's full ordered operation list to a
+    replayable .pakscan script. One op per line, in capture submit order:
+
+      O <hex>     EP1 command frame OUT (0x01); reply on 0x81 is read by replay
+      M <n>       bulk image read of <n> bytes from 0x86
+      C <bmReqType> <bReq> <wValue> <wIndex> <wLen> [data]   EP0 control xfer
+
+    EP1 IN (0x81) submits are folded into the preceding O (command counts match
+    replies 1:1). Replay reproduces the scan and saves the 0x86 bytes."""
+    if scan_device is None:
+        # operational device = the one carrying the bulk image stream (0x86)
+        cnt = Counter(r.dev for r in recs
+                      if r.ep == 0x86 and r.urb == "S")
+        if not cnt:
+            sys.exit("no image stream (0x86) found; is this a scan capture?")
+        scan_device = cnt.most_common(1)[0][0]
+
+    n_o = n_m = n_c = 0
+    with open(path, "w") as fh:
+        fh.write("# pakon scan operation script (from capture)\n")
+        fh.write(f"# device {scan_device}\n")
+        fh.write("# O <hex> = EP1 cmd out (+read reply);  M <n> = read n image "
+                 "bytes from 0x86;  C bmReqType bReq wValue wIndex wLen [data]\n")
+        for r in recs:
+            if r.dev != scan_device or r.urb != "S":
+                continue
+            if r.ep == 0x01 and r.data:        # EP1 command OUT
+                fh.write("O " + bytes(r.data).hex() + "\n"); n_o += 1
+            elif r.ep == 0x86:
+                fh.write(f"M {r.urb_len if r.urb_len is not None else 20480}\n")
+                n_m += 1
+            elif r.setup and r.setup.get("bRequest") in (0xA4, 0xA9):
+                s = r.setup
+                line = (f"C {s['bmRequestType']:02x} {s['bRequest']:02x} "
+                        f"{s['wValue']:04x} {s['wIndex']:04x} {s['wLength']:04x}")
+                if r.data:
+                    line += " " + bytes(r.data).hex()
+                fh.write(line + "\n"); n_c += 1
+    print(f"wrote {path}: device {scan_device} — {n_o} commands, "
+          f"{n_m} image reads, {n_c} control reads")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture")
@@ -367,6 +412,13 @@ def main():
     ap.add_argument("--fw-device", type=int,
                     help="device number of the firmware-load (bootstrap) device "
                          "for --extract-firmware (auto-detected if omitted)")
+    ap.add_argument("--extract-scan", metavar="OUT.pakscan",
+                    help="extract the operational device's full ordered "
+                         "operation list (EP1 commands, image reads, control "
+                         "reads) to a replayable scan script and exit")
+    ap.add_argument("--scan-device", type=int,
+                    help="device number of the operational (f135) device for "
+                         "--extract-scan (auto-detected if omitted)")
     args = ap.parse_args()
 
     fmt = args.format
@@ -389,6 +441,9 @@ def main():
 
     if args.extract_firmware:
         extract_firmware(recs, args.extract_firmware, args.fw_device)
+        return
+    if args.extract_scan:
+        extract_scan(recs, args.extract_scan, args.scan_device)
         return
 
     # Inventory of (bus, device) before filtering — helps pick --device, since

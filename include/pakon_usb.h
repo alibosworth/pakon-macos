@@ -162,6 +162,17 @@ pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t ep,
                             uint8_t *buf, size_t len,
                             size_t *out_received, unsigned timeout_ms);
 
+/*
+ * Generic EP0 control transfer on an open device (used for the scanner's
+ * 0xA4/0xA9 parameter reads). Direction comes from bit 7 of `bm_request_type`.
+ * For IN transfers `buf`/`len` receive up to `len` bytes; `*out_len` (if given)
+ * gets the byte count actually transferred.
+ */
+pakon_result pakon_usb_control(pakon_dev *dev, uint8_t bm_request_type,
+                               uint8_t b_request, uint16_t w_value,
+                               uint16_t w_index, uint8_t *buf, uint16_t len,
+                               size_t *out_len, unsigned timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

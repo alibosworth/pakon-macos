@@ -544,3 +544,25 @@ pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t ep,
         *out_received = (size_t)moved;
     return r;
 }
+
+pakon_result pakon_usb_control(pakon_dev *dev, uint8_t bm_request_type,
+                               uint8_t b_request, uint16_t w_value,
+                               uint16_t w_index, uint8_t *buf, uint16_t len,
+                               size_t *out_len, unsigned timeout_ms)
+{
+    if (out_len)
+        *out_len = 0;
+    if (!dev || !dev->handle || (len && !buf))
+        return PAKON_ERR_PARAM;
+
+    int rc = libusb_control_transfer(dev->handle, bm_request_type, b_request,
+                                     w_value, w_index, buf, len, timeout_ms);
+    if (rc < 0) {
+        pakon_logf(PAKON_LOG_WARN, "control req=0x%02x val=0x%04x: %s",
+                   b_request, w_value, libusb_strerror((enum libusb_error)rc));
+        return (rc == LIBUSB_ERROR_TIMEOUT) ? PAKON_ERR_TIMEOUT : PAKON_ERR_USB;
+    }
+    if (out_len)
+        *out_len = (size_t)rc;
+    return PAKON_OK;
+}

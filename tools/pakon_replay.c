@@ -112,12 +112,116 @@ static int do_open(unsigned timeout)
     return failures ? 1 : 0;
 }
 
+/* ---- Phase 5: replay a full scan operation script (.pakscan) ---- */
+
+#define SCAN_IMG_TIMEOUT_MS 5000
+
+/* Parse a hex byte string into out[max]; returns count or -1. */
+static int hexbytes(const char *s, uint8_t *out, size_t max)
+{
+    size_t n = 0;
+    int hi = -1;
+    for (; *s && *s != '\n' && *s != '\r'; s++) {
+        if (*s == ' ') continue;
+        int v = (*s >= '0' && *s <= '9') ? *s - '0'
+              : (*s >= 'a' && *s <= 'f') ? *s - 'a' + 10
+              : (*s >= 'A' && *s <= 'F') ? *s - 'A' + 10 : -1;
+        if (v < 0) return -1;
+        if (hi < 0) hi = v;
+        else { if (n >= max) return -1; out[n++] = (uint8_t)((hi<<4)|v); hi = -1; }
+    }
+    return hi < 0 ? (int)n : -1;
+}
+
+static int do_scan(const char *script, const char *image_path, unsigned timeout)
+{
+    FILE *fp = fopen(script, "r");
+    if (!fp) { fprintf(stderr, "cannot open scan script '%s'\n", script); return 1; }
+
+    pakon_ctx *ctx = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK) { fclose(fp); return 1; }
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open device failed: %s (need operational f135)\n",
+                pakon_result_str(r));
+        fclose(fp); pakon_usb_exit(ctx); return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev); fclose(fp); pakon_usb_exit(ctx); return 1;
+    }
+
+    FILE *img = fopen(image_path, "wb");
+    if (!img) {
+        fprintf(stderr, "cannot open image '%s'\n", image_path);
+        pakon_usb_release(dev); pakon_usb_close(dev); fclose(fp);
+        pakon_usb_exit(ctx); return 1;
+    }
+
+    char line[1024];
+    uint8_t buf[65536];
+    unsigned long ncmd = 0, nimg = 0, errs = 0;
+    unsigned long long img_bytes = 0;
+    int rc = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0') continue;
+
+        if (*p == 'O') {                                  /* command + reply */
+            int n = hexbytes(p + 1, buf, sizeof(buf));
+            if (n < 0) { fprintf(stderr, "bad O line\n"); rc = 1; break; }
+            size_t sent = 0;
+            r = pakon_usb_send(dev, PAKON_EP_CMD_OUT, buf, (size_t)n, &sent, timeout);
+            if (r == PAKON_OK) {
+                size_t got = 0;
+                r = pakon_usb_recv(dev, PAKON_EP_CMD_IN, buf, sizeof(buf), &got, timeout);
+            }
+            if (r != PAKON_OK) errs++;
+            ncmd++;
+        } else if (*p == 'M') {                           /* image read */
+            unsigned long want = strtoul(p + 1, NULL, 0);
+            if (want > sizeof(buf)) want = sizeof(buf);
+            size_t got = 0;
+            r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, buf, want, &got, SCAN_IMG_TIMEOUT_MS);
+            if (got) { fwrite(buf, 1, got, img); img_bytes += got; }
+            if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) errs++;
+            if (++nimg % 1000 == 0)
+                printf("  ... %lu image reads, %llu bytes\n", nimg, img_bytes);
+        } else if (*p == 'C') {                           /* control xfer */
+            unsigned brt, breq, wval, widx, wlen; int consumed = 0;
+            if (sscanf(p + 1, "%x %x %x %x %x%n", &brt,&breq,&wval,&widx,&wlen,&consumed) != 5) {
+                fprintf(stderr, "bad C line\n"); rc = 1; break;
+            }
+            int dn = hexbytes(p + 1 + consumed, buf, sizeof(buf));
+            if (dn < 0) dn = 0;
+            size_t got = 0;
+            r = pakon_usb_control(dev, (uint8_t)brt, (uint8_t)breq, (uint16_t)wval,
+                                  (uint16_t)widx, buf, (uint16_t)wlen, &got, timeout);
+            if (r != PAKON_OK) errs++;
+        }
+    }
+
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+    fclose(fp);
+    fclose(img);
+    printf("\nscan replay done: %lu commands, %lu image reads, %llu image bytes "
+           "-> %s (%lu transfer errors)\n",
+           ncmd, nimg, img_bytes, image_path, errs);
+    return rc;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s [--open] [--scan] [--timeout MS] [--help]\n"
-        "  --open   replay the captured open handshake, verify replies\n"
-        "  --scan   run the scan state machine, write an image     [Phase 5]\n"
+        "usage: %s [--open] [--scan FILE] [--image OUT] [--timeout MS] [--help]\n"
+        "  --open        replay the captured open handshake, verify replies\n"
+        "  --scan FILE   replay a .pakscan operation script (drives a scan!)\n"
+        "  --image OUT   raw image output for --scan (default pakon_scan.raw)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
         argv0);
@@ -125,7 +229,9 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    int want_open = 0, want_scan = 0;
+    int want_open = 0;
+    const char *scan_file = NULL;
+    const char *image_path = "pakon_scan.raw";
     unsigned timeout = 1000;
 
     for (int i = 1; i < argc; i++) {
@@ -134,25 +240,25 @@ int main(int argc, char **argv)
             return 0;
         } else if (!strcmp(argv[i], "--open")) {
             want_open = 1;
-        } else if (!strcmp(argv[i], "--scan")) {
-            want_scan = 1;
+        } else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {
+            scan_file = argv[++i];
+        } else if (!strcmp(argv[i], "--image") && i + 1 < argc) {
+            image_path = argv[++i];
         } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
             timeout = (unsigned)strtoul(argv[++i], NULL, 0);
         } else {
-            fprintf(stderr, "unknown argument: %s\n", argv[i]);
+            fprintf(stderr, "unknown/incomplete argument: %s\n", argv[i]);
             usage(argv[0]);
             return 2;
         }
     }
 
-    if (!want_open && !want_scan) {
+    if (!want_open && !scan_file) {
         usage(argv[0]);
         return 2;
     }
 
-    if (want_scan) {
-        printf("--scan: not yet implemented (Phase 5)\n");
-        return 1;
-    }
+    if (scan_file)
+        return do_scan(scan_file, image_path, timeout);
     return do_open(timeout);
 }
