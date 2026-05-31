@@ -179,13 +179,15 @@ propagates to test binaries with correct search dirs.
   the line axis. **This supersedes the old plane-sequential guess** (`raw2pnm.py
   --planar`); `tools/pakon_image.py` is the correct decoder. `--autocrop`
   (default) strips leader + blank no-film pre/post scan + gate margin.
-  - **TWO OPEN QUESTIONS (next):** (Q1) RGB **ghosting** ⇒ channels likely
-    misregistered; the per-line "pad 2 / restart at R" model may be wrong
-    (triples may run continuously) — measure the true per-line phase. (Q2) the
-    **rebate/leader renders BLACK** though clear film should be brightest in a
-    transmission scan ⇒ the stream looks **already inverted** (value ∝ density),
-    which also explains the magenta cast — confirm the photometric sense and the
-    correct invert/no-invert before trusting colour.
+  - **Q1 ghosting — SOLVED:** trilinear CCD. Per-line "restart at R" is correct
+    (no phase drift); R/G/B sensor lines are spaced 8 scan-lines apart (order
+    G/B/R), so register `R[y], B[y-8], G[y-16]` (auto-measured). Shipped as
+    `pakon_image.py --register` (default on).
+  - **Q2 sense — ANSWERED: NOT pre-inverted.** Transmission-sense (no-film open
+    gate ≈ 48900 max, dark leader ≈ 520); it's a raw negative and the black
+    rebate is the *correct* result of inverting one. The magenta is the C-41
+    **orange mask**; proper fix is mask-aware/density-space inversion (dedicated
+    film software, or an optional in-tool mode — naive `max-raw` can't do it).
   - A poll-until-ready state machine is the robust follow-up to verbatim replay.
 
 ## Dev / sync workflow

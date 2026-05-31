@@ -37,22 +37,30 @@ tail; uniform gate margin at cols ~2050–2666; orange-base sliver at col 0.
 `--rotate {90,180,270}` per frame; `--invert` is a LINEAR preview only.
 Run: `pakon_image.py scan.raw --rotate 90 --frames 4` → four 3236×1999 negs.
 
-**OPEN QUESTIONS (next, raised 2026-05-31 from the rendered output):**
-- **Q1 — RGB ghosting / channel misregistration.** Decoded frames show colour
-  ghosting → channels likely not aligned. The per-line "pad 2 + restart at R"
-  model may be wrong: if RGB triples run *continuously* across line breaks (no
-  per-line reset), our reshape misaligns channels by a drifting phase. TODO:
-  cross-correlate channels to measure the true per-line phase / sub-sample
-  offset; test continuous-triple vs per-line-reset deinterleave; find the real
-  stride/pad (candidates near 7998/8001 = multiples of 3).
-- **Q2 — colours are very magenta AND the rebate/leader renders BLACK.** In a
-  transmission scan, clear film (rebate/leader) passes the most light and should
-  be the BRIGHTEST, not black. Black rebate ⇒ value tracks *density*, not
-  transmission ⇒ **the stream appears to be already inverted** (or log-density)
-  rather than a raw negative. This would explain the magenta cast and means our
-  `--invert` semantics and the "raw negative for C-41 software" assumption need
-  rethinking. TODO: confirm the photometric sense from the rebate/leader values
-  and from a known clear vs dense region; decide the correct invert/no-invert.
+**Q1 — RGB ghosting — SOLVED (2026-05-31).** NOT a phase/interleave problem:
+the per-line "restart at R" model is correct (period-3 power in per-row channel
+means = 0; every row's best phase = 0). The real cause is a **trilinear CCD** —
+R/G/B sensor lines are spaced along the scan direction, so the channels are
+offset in scan lines. Measured by inter-channel vertical cross-correlation:
+feature at R row y appears in **B at y-8 and G at y-16** (8-line spacing, sensor
+order G/B/R). Fix: co-register `R[y], B[y-8], G[y-16]` → edge fringing gone,
+residual offset 0. Implemented as `pakon_image.py --register` (default on,
+auto-measures the leads; `--reg-leads G,B` to force, `--no-register` to disable).
+
+**Q2 — magenta / "black rebate" — ANSWERED (2026-05-31): stream is NOT
+pre-inverted.** Photometric refs prove transmission-sense (more light → higher
+value): dark leader ≈ 520, **no-film open gate ≈ 48900 (max)**, orange base
+edge R≈11800/G≈5600/B≈4800 (the C-41 mask), film midtones R15223/G18723/B16000.
+So it's a true **raw digital negative**; the black rebate the human saw is the
+*correct* result of inverting a negative (clear/unexposed border = high
+transmission → black), not double-inversion. The **magenta** is purely the
+orange mask: naive `max-raw` leaves green lowest → magenta. A mask-aware invert
+(per-channel density relative to the film base) fixes it but is **sensitive to
+the base estimate** — sampling the bright scene instead of the true rebate
+over-corrects to green. TODO (optional): proper C-41 inversion in-tool
+(sample the real rebate / per-channel base, density space, gray-balance), OR
+keep emitting the registered+cropped raw negative for dedicated film software
+(Negative Lab Pro, darktable negadoctor, Grain2Pixel).
 
 TODO after Q1/Q2: frame-boundary auto-detection (gaps); pixels may be non-square
 (across-sensor oversampled vs motor step) — Pakon's own output is 3000×2000/

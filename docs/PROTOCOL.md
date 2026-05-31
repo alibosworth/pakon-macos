@@ -193,14 +193,16 @@ Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
   ~2050+) and an orange-base sliver at col 0. `pakon_image.py --autocrop`
   isolates the film.
 
-**OPEN — photometric/alignment questions (2026-05-31), see STATUS.md:**
-- **Q1 ghosting:** decoded frames show RGB ghosting ⇒ channels may be
-  misregistered; the per-line pad/reset model may be wrong (triples might run
-  continuously across line breaks). Need to measure the true per-line phase.
-- **Q2 sense:** the rebate/leader renders **black**, but clear film should be
-  the *brightest* in a transmission scan ⇒ the stream looks **already inverted**
-  (value ∝ density), which would also explain the magenta cast. The correct
-  invert/no-invert and "raw negative" assumption need confirming.
+**Resolved photometric/alignment questions (2026-05-31), see STATUS.md:**
+- **Q1 ghosting — trilinear CCD.** The per-line "restart at R" is correct (no
+  phase drift); the R/G/B sensor lines are spaced along the scan, so channels
+  are offset by **8 lines each** (R lags B by 8, G by 16; order G/B/R). Register
+  `R[y], B[y-8], G[y-16]` → fringing gone. `pakon_image.py --register`.
+- **Q2 sense — NOT pre-inverted.** Transmission-sense confirmed: no-film open
+  gate ≈ 48900 (max), dark leader ≈ 520. It's a raw negative; the black rebate
+  is the correct result of inverting a negative. The magenta cast is the C-41
+  orange mask (base ≈ orange, R≫B); proper inversion is mask-aware/density-space
+  (left to dedicated film software, or an optional in-tool mode).
 
 Note: film is **motor-fed whole rolls** — design CANCEL to let the feed finish,
 not hard-abort.
