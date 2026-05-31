@@ -526,23 +526,20 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
          * the film isn't streaming continuously, the readout needs the arm pair
          * to produce the next block (this is the same arming the preview phase
          * does). When film DOES stream continuously there are no empty reads, so
-         * this never fires mid-scan -- matching the trace. */
+         * this never fires mid-scan -- matching the trace.
+         *
+         * Read BOTH arm replies (07 02 ..) to keep EP1 IN balanced -- one reply
+         * per command -- but ignore their content. Their status is not
+         * meaningful here, and the working build ignored them entirely; do NOT
+         * abort on an odd/short reply (that was a self-inflicted desync bug). The
+         * SM_LOAD_WAIT / SM_MAX_EMPTY bounds below already cap any spin. */
         uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
             st = pakon_packet_status(&reply);
         else (*errs)++;
-
-        pakon_result ra = sm_cmd(dev, host_arm, sizeof(host_arm), NULL, timeout);
-        pakon_result rb = sm_cmd(dev, picl_arm, sizeof(picl_arm), &reply, timeout);
+        sm_cmd(dev, host_arm, sizeof(host_arm), &reply, timeout);
+        sm_cmd(dev, picl_arm, sizeof(picl_arm), &reply, timeout);
         (*ncmd) += 3;
-        if (ra != PAKON_OK || rb != PAKON_OK) {
-            /* The command channel stopped accepting writes -- bail cleanly
-             * instead of spinning (the old failure mode that wedged the bus). */
-            fprintf(stderr, "  [sm] command channel unresponsive on re-arm "
-                    "(%s/%s) -> aborting\n", pakon_result_str(ra), pakon_result_str(rb));
-            (*errs)++;
-            break;
-        }
 
         idle++;
         if (!film_seen) {                 /* operator still feeding the film */
