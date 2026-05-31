@@ -71,7 +71,18 @@ file, e.g. `test/captures/scan-color-2000dpi.notes.md` recording: model,
 settings, the t0..t3 narration, and anything unusual. (Large image payloads are
 fine.)
 
-## 5. Fallback: capture inside the Windows VM
+## 4a. IMPORTANT: host usbmon does not capture bulk image payloads
+
+With VirtualBox usbfs passthrough, host-side usbmon captures the **command
+channel** fine (small EP1 transfers go through kernel buffers) but records
+**zero payload bytes for the large bulk-IN image transfers on `0x86`** (they
+show `urb.length` but `len_cap=0`, because the guest's large buffers are filled
+directly in guest memory the host can't snapshot). The image is read in
+20480-byte chunks, but to capture the actual image **bytes** you must capture
+**inside the VM with USBPcap** (§5), which sees full payloads at the Windows
+USB stack. Use host usbmon for the protocol; use in-VM USBPcap for image data.
+
+## 5. Fallback / image data: capture inside the Windows VM
 
 If the host can't see the device, install **Wireshark + USBPcap** inside the VM
 and capture the USBPcap interface there while scanning; export to pcapng. Same

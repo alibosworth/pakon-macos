@@ -110,25 +110,52 @@ const char *pakon_status_str(pakon_status s);
 const char *pakon_addr_str(pakon_addr a);
 
 /*
- * Compute the frame checksum. The exact algorithm is INFERRED from sample
- * packets and is derived/validated in Phase 3 (e.g. the open packet
- * 04 03 10 00 85). STUB for now — returns 0 and reports UNIMPLEMENTED.
+ * On-wire length of a frame. CONFIRMED from capture: a frame is transmitted as
+ * exactly `2 + count` bytes ([type][count][count data bytes]) — it is NOT
+ * padded to PAKON_PACKET_SIZE (36 is only the max in-memory struct size).
  */
-pakon_result pakon_checksum(const pakon_packet *pkt, uint8_t *out_sum);
+static inline size_t pakon_wire_len(const pakon_packet *pkt)
+{
+    return (size_t)2 + pkt->count;
+}
 
 /*
- * Build a command frame into `pkt`: sets type/count, copies `data`/`dlen`,
- * fills the trailing bytes, and writes the checksum byte. STUB until Phase 3.
+ * Build a frame into `pkt`: sets type, count=`dlen`, and copies `data` (which
+ * includes the address byte as data[0] and any command/parameter bytes). Note
+ * we do NOT compute a checksum here: captured short frames carry no separate
+ * checksum byte (e.g. `04 03 44 00 00` ends in 00 while `04 03 10 00 85` ends
+ * in 85 — the trailing byte is a command/parameter, not a checksum). If a
+ * checksum scheme is later found for longer frames it will be added explicitly.
+ * Returns PAKON_ERR_PARAM if dlen > PAKON_DATA_MAX.
  */
 pakon_result pakon_packet_build(pakon_packet *pkt, uint8_t type,
                                 const uint8_t *data, size_t dlen);
 
 /*
- * Parse exactly 36 raw bytes into `pkt` and sanity-check (count <= 34,
- * checksum, etc.). STUB until Phase 3.
+ * Serialize `pkt` into `out` (must hold at least pakon_wire_len(pkt) bytes).
+ * Writes `*out_len` = the wire length actually written.
+ */
+pakon_result pakon_packet_serialize(const pakon_packet *pkt,
+                                    uint8_t *out, size_t out_cap,
+                                    size_t *out_len);
+
+/*
+ * Parse `rawlen` received bytes into `pkt`, validating self-consistency
+ * (rawlen >= 2 and rawlen == 2 + raw[1], count <= PAKON_DATA_MAX).
  */
 pakon_result pakon_packet_parse(pakon_packet *pkt, const uint8_t *raw,
                                 size_t rawlen);
+
+/* Convenience accessors (valid once count is set). */
+static inline uint8_t pakon_packet_addr(const pakon_packet *pkt)
+{
+    return pkt->count >= 1 ? pkt->data[0] : 0;
+}
+/* In a device->host reply the status byte follows the address (data[1]). */
+static inline uint8_t pakon_packet_status(const pakon_packet *pkt)
+{
+    return pkt->count >= 2 ? pkt->data[1] : 0;
+}
 
 #ifdef __cplusplus
 }

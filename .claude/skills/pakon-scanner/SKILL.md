@@ -140,14 +140,24 @@ propagates to test binaries with correct search dirs.
     then PIC probes `04 03 <addr> 00 00`). The `0x85` is a param byte, not a
     checksum. A control `0xA4`/`0xA9` pair reads a 32-byte-chunked calibration/
     param table. See docs/PROTOCOL.md for all of it.
-- **Next: Phase 3.** Implement the framing (wire = 2+count) + `pakon_cmd` over
-  EP1 bulk (write `0x01`, read `0x81`) + `pakon_replay --open` replaying the
-  captured open sequence verbatim. Then derive the checksum from the 2218
-  command samples, and map the scan-start + `0x86` image format (Phase 5).
-- **Testing caveat:** to run our code on hardware the device must be in `f135`
-  state AND on the host (not held by the VirtualBox VM). Either implement the
-  `f235→f135` firmware load ourselves (standard FX2, see PROTOCOL.md) or detach
-  from the VM after it loads firmware.
+- **Phase 3 implemented (untested on hardware):**
+  - `pakon_proto`: real `pakon_packet_build`/`_serialize`/`_parse`, wire length
+    `2+count`, `pakon_wire_len`/`_addr`/`_status` helpers. No checksum (short
+    frames carry none; the trailing byte is a param). Unit-tested in test_proto
+    against the real open bytes.
+  - `pakon_cmd.[ch]` (glue using both layers): `pakon_cmd`/`pakon_cmd_raw` send
+    a frame on EP1 OUT, read the reply on EP1 IN. Endpoint constants
+    `PAKON_EP_CMD_OUT/IN/IMAGE_IN` in pakon_usb.h.
+  - `pakon_replay --open`: replays the captured open sequence and verifies each
+    reply. Needs operational `0F05:F135` on the host.
+- **Testing caveat:** to run our code the device must be `f135` AND on the host
+  (not held by the VirtualBox VM). Cleanest: implement the `f235→f135` firmware
+  load ourselves (standard FX2; the firmware bytes can be extracted from the
+  `0xA0`/`0xA3` transfers in the capture, avoiding the need for the .hex blobs).
+- **Phase 5 TODO:** image bytes are NOT in the host-usbmon capture (usbfs
+  passthrough drops large bulk-IN payloads; `0x86` chunks are 20480 bytes). Need
+  an in-VM USBPcap capture for the image-stream format. Command vocabulary is
+  known: `03 01 10` poll (1605×), `01 03 20/24 01 02` PIC writes, etc.
 
 ## Dev / sync workflow
 

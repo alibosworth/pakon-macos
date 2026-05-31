@@ -39,6 +39,14 @@ extern "C" {
 int pakon_is_warm_id(uint16_t vid, uint16_t pid);
 
 /*
+ * Operational (f135) endpoints, CONFIRMED from a scan capture: interface 0,
+ * single setting, 3 bulk endpoints.
+ */
+#define PAKON_EP_CMD_OUT   0x01   /* command frames host -> device */
+#define PAKON_EP_CMD_IN    0x81   /* command reply / status device -> host */
+#define PAKON_EP_IMAGE_IN  0x86   /* bulk image stream device -> host */
+
+/*
  * Cold (pre-firmware, FX2 bootloader) identity. UNKNOWN until confirmed via
  * lsusb on a freshly powered scanner — see STOP POINT A in Phase 1. These are
  * deliberately left as 0 so nothing accidentally matches a guessed value.

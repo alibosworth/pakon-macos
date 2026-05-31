@@ -19,6 +19,7 @@ add_library(pakon STATIC
   src/pakon_log.c
   src/pakon_proto.c
   src/pakon_hex.c
+  src/pakon_cmd.c
   src/pakon_usb.c
 )
 target_include_directories(pakon PUBLIC ${CMAKE_SOURCE_DIR}/include)

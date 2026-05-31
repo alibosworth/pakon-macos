@@ -41,27 +41,53 @@ const char *pakon_addr_str(pakon_addr a)
     return "AD_?";
 }
 
-pakon_result pakon_checksum(const pakon_packet *pkt, uint8_t *out_sum)
-{
-    /* TODO(Phase 3): derive from known-good packets, e.g. 04 03 10 00 85. */
-    (void)pkt;
-    if (out_sum)
-        *out_sum = 0;
-    return PAKON_ERR_UNIMPLEMENTED;
-}
+#include <string.h>
 
 pakon_result pakon_packet_build(pakon_packet *pkt, uint8_t type,
                                 const uint8_t *data, size_t dlen)
 {
-    /* TODO(Phase 3). */
-    (void)pkt; (void)type; (void)data; (void)dlen;
-    return PAKON_ERR_UNIMPLEMENTED;
+    if (!pkt || (dlen && !data) || dlen > PAKON_DATA_MAX)
+        return PAKON_ERR_PARAM;
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = type;
+    pkt->count = (uint8_t)dlen;
+    if (dlen)
+        memcpy(pkt->data, data, dlen);
+    return PAKON_OK;
+}
+
+pakon_result pakon_packet_serialize(const pakon_packet *pkt,
+                                    uint8_t *out, size_t out_cap,
+                                    size_t *out_len)
+{
+    if (!pkt || !out)
+        return PAKON_ERR_PARAM;
+    if (pkt->count > PAKON_DATA_MAX)
+        return PAKON_ERR_PROTO;
+    size_t wlen = pakon_wire_len(pkt);
+    if (out_cap < wlen)
+        return PAKON_ERR_PARAM;
+    out[0] = pkt->type;
+    out[1] = pkt->count;
+    memcpy(out + 2, pkt->data, pkt->count);
+    if (out_len)
+        *out_len = wlen;
+    return PAKON_OK;
 }
 
 pakon_result pakon_packet_parse(pakon_packet *pkt, const uint8_t *raw,
                                 size_t rawlen)
 {
-    /* TODO(Phase 3). */
-    (void)pkt; (void)raw; (void)rawlen;
-    return PAKON_ERR_UNIMPLEMENTED;
+    if (!pkt || !raw)
+        return PAKON_ERR_PARAM;
+    if (rawlen < 2)
+        return PAKON_ERR_PROTO;
+    uint8_t count = raw[1];
+    if (count > PAKON_DATA_MAX || rawlen != (size_t)2 + count)
+        return PAKON_ERR_PROTO;   /* not a self-consistent frame */
+    memset(pkt, 0, sizeof(*pkt));
+    pkt->type = raw[0];
+    pkt->count = count;
+    memcpy(pkt->data, raw + 2, count);
+    return PAKON_OK;
 }

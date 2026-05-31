@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stddef.h>
+#include <string.h>
 
 static int failures = 0;
 
@@ -40,9 +41,41 @@ int main(void)
     CHECK(PS_SUCCESS == 0, "PS_SUCCESS == 0");
     CHECK(PS_BUS_ERROR == 9, "PS_BUS_ERROR == 9");
 
-    /* TODO(Phase 3): checksum round-trip against known-good packets such as
-     * the open packet 04 03 10 00 85. pakon_checksum is a stub for now. */
-    printf("# skip - checksum round-trip (Phase 3, pakon_checksum stubbed)\n");
+    /* Framing: wire length is 2 + count (confirmed from capture), not 36. */
+    {
+        /* the real open packet: 04 03 10 00 85 */
+        const uint8_t open_data[] = {0x10, 0x00, 0x85};
+        pakon_packet pkt;
+        CHECK(pakon_packet_build(&pkt, 0x04, open_data, 3) == PAKON_OK,
+              "build open frame");
+        CHECK(pkt.type == 0x04 && pkt.count == 3, "open type/count set");
+        CHECK(pakon_wire_len(&pkt) == 5, "open wire length == 5");
+        CHECK(pakon_packet_addr(&pkt) == AD_HOST, "open addr == AD_HOST");
+
+        uint8_t wire[36];
+        size_t wlen = 0;
+        CHECK(pakon_packet_serialize(&pkt, wire, sizeof(wire), &wlen) == PAKON_OK
+              && wlen == 5, "serialize open frame");
+        const uint8_t expect[] = {0x04, 0x03, 0x10, 0x00, 0x85};
+        CHECK(wlen == 5 && memcmp(wire, expect, 5) == 0,
+              "serialized bytes == 04 03 10 00 85");
+    }
+    {
+        /* parse the open reply 07 02 10 00 and read its status byte */
+        const uint8_t reply[] = {0x07, 0x02, 0x10, 0x00};
+        pakon_packet pkt;
+        CHECK(pakon_packet_parse(&pkt, reply, 4) == PAKON_OK,
+              "parse reply frame");
+        CHECK(pkt.type == 0x07 && pkt.count == 2, "reply type/count");
+        CHECK(pakon_packet_status(&pkt) == PS_SUCCESS, "reply status success");
+    }
+    {
+        /* self-consistency: reject a frame whose length != 2 + count */
+        const uint8_t bad[] = {0x8e, 0x01, 0x00, 0x00, 0x66};  /* a 0xA9 read */
+        pakon_packet pkt;
+        CHECK(pakon_packet_parse(&pkt, bad, 5) == PAKON_ERR_PROTO,
+              "reject inconsistent frame (len != 2+count)");
+    }
 
     if (failures) {
         printf("\n%d test(s) FAILED\n", failures);
