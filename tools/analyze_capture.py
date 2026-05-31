@@ -20,10 +20,18 @@ This tool only parses USB; it encodes no guesses about the Pakon protocol
 beyond the documented 36-byte frame layout.
 """
 import argparse
+import signal
 import struct
 import subprocess
 import sys
 from collections import Counter
+
+# Behave like a normal Unix filter when piped into `head`/`less`: die quietly
+# on SIGPIPE instead of raising BrokenPipeError. (POSIX only.)
+try:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+except (AttributeError, ValueError):
+    pass
 
 # Documented frame enums (kept in sync with include/pakon_proto.h).
 ADDR = {0x10: "AD_HOST", 0x20: "AD_PICL", 0x22: "AD_BOOT_PICL",
