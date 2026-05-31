@@ -290,8 +290,19 @@ static void drain_image(pakon_dev *dev, FILE *img,
     }
 }
 
+/* Is this command one whose live reply we want to trace? Polls (03 01 xx) and
+ * the engine kicks (8a/92 readout, a0/a2 motor). */
+static int trace_interesting(const uint8_t *raw, int n)
+{
+    if (n >= 3 && raw[0] == 0x03 && raw[1] == 0x01) return 1;          /* poll  */
+    if (n >= 5 && raw[0] == 0x04 && raw[1] == 0x03 &&
+        (raw[4] == 0x8a || raw[4] == 0x92 || raw[4] == 0xa0 || raw[4] == 0xa2))
+        return 1;                                                      /* kick  */
+    return 0;
+}
+
 static int do_scan(const char *script, const char *image_path, unsigned timeout,
-                   int drain)
+                   int drain, int trace_status)
 {
     FILE *fp = fopen(script, "r");
     if (!fp) { fprintf(stderr, "cannot open scan script '%s'\n", script); return 1; }
@@ -331,13 +342,27 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
         if (*p == 'O') {                                  /* command + reply */
             int n = hexbytes(p + 1, buf, sizeof(buf));
             if (n < 0) { fprintf(stderr, "bad O line\n"); rc = 1; break; }
-            size_t sent = 0;
+            /* Save the command bytes before the reply overwrites buf. */
+            uint8_t snd[8]; int sn = n < (int)sizeof(snd) ? n : (int)sizeof(snd);
+            memcpy(snd, buf, (size_t)sn);
+            int trace = trace_status && trace_interesting(snd, n);
+            size_t sent = 0, got = 0;
             r = pakon_usb_send(dev, PAKON_EP_CMD_OUT, buf, (size_t)n, &sent, timeout);
-            if (r == PAKON_OK) {
-                size_t got = 0;
+            if (r == PAKON_OK)
                 r = pakon_usb_recv(dev, PAKON_EP_CMD_IN, buf, sizeof(buf), &got, timeout);
-            }
             if (r != PAKON_OK) errs++;
+            if (trace) {
+                printf("  [trace @img=%lu] send", nimg);
+                for (int k = 0; k < sn; k++) printf(" %02x", snd[k]);
+                if (r == PAKON_OK) {
+                    printf("  reply");
+                    for (size_t k = 0; k < got; k++) printf(" %02x", buf[k]);
+                    printf("  (status=%u)", got >= 4 ? buf[3] : 0);
+                } else {
+                    printf("  -> %s", pakon_result_str(r));
+                }
+                printf("\n");
+            }
             ncmd++;
         } else if (*p == 'M') {                           /* image read */
             unsigned long want = strtoul(p + 1, NULL, 0);
@@ -642,6 +667,8 @@ static void usage(const char *argv0)
         "                  stop on end-of-roll white (any roll length)\n"
         "  --image OUT   raw image output for --scan/--scan-sm (default pakon_scan.raw)\n"
         "  --drain       after the scan script ends, keep reading 0x86 until done\n"
+        "  --trace-status  with --scan: log live poll/kick replies + status, with\n"
+        "                  the current image-read index (to learn the cadence)\n"
         "  --max-mb N    --scan-sm safety cap on image bytes (default 512, 0=off)\n"
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
@@ -651,7 +678,7 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    int want_open = 0, drain = 0;
+    int want_open = 0, drain = 0, trace_status = 0;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -677,6 +704,8 @@ int main(int argc, char **argv)
             image_path = argv[++i];
         } else if (!strcmp(argv[i], "--drain")) {
             drain = 1;
+        } else if (!strcmp(argv[i], "--trace-status")) {
+            trace_status = 1;
         } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
             timeout = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--limit") && i + 1 < argc) {
@@ -702,6 +731,6 @@ int main(int argc, char **argv)
     if (scan_sm_file)
         return do_scan_sm(scan_sm_file, image_path, timeout, max_mb);
     if (scan_file)
-        return do_scan(scan_file, image_path, timeout, drain);
+        return do_scan(scan_file, image_path, timeout, drain, trace_status);
     return do_open(timeout);
 }
