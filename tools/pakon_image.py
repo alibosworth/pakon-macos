@@ -218,7 +218,7 @@ def main():
         suffix = f"_{i+1}" if fr > 1 else ""
         tif = f"{args.out}{suffix}.tif"
         write_tiff(part, tif)
-        write_preview(part, f"{args.out}{suffix}.png")
+        # write_preview(part, f"{args.out}{suffix}.png")  # Disabled per request
         print(f"wrote {tif}  ({part.shape[1]}x{part.shape[0]}, 16-bit RGB"
               f"{' inverted' if args.invert else ' raw/negative'})")
 
