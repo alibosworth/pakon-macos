@@ -20,6 +20,7 @@ This tool only parses USB; it encodes no guesses about the Pakon protocol
 beyond the documented 36-byte frame layout.
 """
 import argparse
+import struct
 import subprocess
 import sys
 from collections import Counter
@@ -72,7 +73,7 @@ def _intish(s):
 
 class Rec:
     __slots__ = ("ts", "ttype", "direction", "bus", "dev", "ep", "urb",
-                 "setup", "data")
+                 "setup", "data", "urbid")
 
     def __init__(self):
         self.ts = 0.0
@@ -84,6 +85,11 @@ class Rec:
         self.urb = "?"
         self.setup = None     # dict for control submits
         self.data = b""
+        self.urbid = None     # pairs a submit (S) with its completion (C)
+
+
+def _is_vendor(setup):
+    return bool(setup) and ((setup.get("bmRequestType", 0) >> 5) & 3) == 2
 
 
 def parse_tshark_tsv(lines):
@@ -172,6 +178,81 @@ def parse_usbmon_text(lines):
     return recs
 
 
+# Linux usbmon pcap link types and header sizes.
+LINKTYPE_USB_LINUX = 189          # 48-byte header
+LINKTYPE_USB_LINUX_MMAPPED = 220  # 64-byte header
+
+
+def _usbmon_record(data, hdrlen, end):
+    """Build a Rec from one usbmon packet (header + payload)."""
+    if len(data) < 48:
+        return None
+    r = Rec()
+    r.urbid = struct.unpack(end + "Q", data[0:8])[0]
+    r.urb = {0x53: "S", 0x43: "C", 0x45: "E"}.get(data[8], "?")
+    xfer = data[9]
+    r.ttype = TT.get(xfer, "?")
+    epnum = data[10]
+    r.ep = epnum
+    r.direction = "IN" if (epnum & 0x80) else "OUT"
+    r.dev = data[11]
+    r.bus = struct.unpack(end + "H", data[12:14])[0]
+    flag_setup = data[14]
+    ts_sec = struct.unpack(end + "q", data[16:24])[0]
+    ts_usec = struct.unpack(end + "i", data[24:28])[0]
+    r.ts = ts_sec + ts_usec / 1e6
+    len_cap = struct.unpack(end + "I", data[36:40])[0]
+    # setup packet (8 bytes at offset 40) is valid when flag_setup == 0; USB
+    # setup fields are little-endian on the wire.
+    if xfer == 2 and flag_setup == 0:
+        s = data[40:48]
+        r.setup = {
+            "bmRequestType": s[0], "bRequest": s[1],
+            "wValue": s[2] | (s[3] << 8), "wIndex": s[4] | (s[5] << 8),
+            "wLength": s[6] | (s[7] << 8),
+        }
+    r.data = bytes(data[hdrlen:hdrlen + len_cap])
+    return r
+
+
+def parse_pcapng(path):
+    """Pure-Python pcapng reader for Linux usbmon captures (no tshark)."""
+    with open(path, "rb") as fh:
+        blob = memoryview(fh.read())
+    if len(blob) < 12 or bytes(blob[0:4]) != b"\x0a\x0d\x0d\x0a":
+        sys.exit("not a pcapng file (or unsupported); use --format tsv/usbmon")
+    # Byte order from the Section Header Block's magic at offset 8.
+    end = "<" if struct.unpack("<I", blob[8:12])[0] == 0x1A2B3C4D else ">"
+
+    recs = []
+    iface_linktype = []
+    off = 0
+    n = len(blob)
+    while off + 12 <= n:
+        btype = struct.unpack(end + "I", blob[off:off + 4])[0]
+        blen = struct.unpack(end + "I", blob[off + 4:off + 8])[0]
+        if blen < 12 or off + blen > n:
+            break
+        body = blob[off + 8:off + blen - 4]
+        if btype == 0x00000001:                       # Interface Description
+            lt = struct.unpack(end + "H", body[0:2])[0]
+            iface_linktype.append(lt)
+        elif btype == 0x00000006:                      # Enhanced Packet Block
+            iface_id = struct.unpack(end + "I", body[0:4])[0]
+            cap_len = struct.unpack(end + "I", body[12:16])[0]
+            pkt = body[20:20 + cap_len]
+            lt = iface_linktype[iface_id] if iface_id < len(iface_linktype) \
+                else LINKTYPE_USB_LINUX_MMAPPED
+            hdrlen = 48 if lt == LINKTYPE_USB_LINUX else 64
+            rec = _usbmon_record(pkt, hdrlen, end)
+            if rec:
+                recs.append(rec)
+        elif btype == 0x00000003:                      # Simple Packet Block
+            pass  # no per-interface id / timestamp; skipped (dumpcap uses EPB)
+        off += blen
+    return recs
+
+
 def run_tshark(path):
     cmd = ["tshark", "-r", path, "-T", "fields", "-E", "separator=\t",
            "-E", "occurrence=f"]
@@ -212,12 +293,16 @@ def decode_pakon_frame(data):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture")
-    ap.add_argument("--format", choices=["auto", "pcapng", "tsv", "usbmon"],
+    ap.add_argument("--format",
+                    choices=["auto", "pcapng", "tshark", "tsv", "usbmon"],
                     default="auto")
     ap.add_argument("--bus", type=int, help="filter to this USB bus")
     ap.add_argument("--device", type=int, help="filter to this device number")
     ap.add_argument("--max-data", type=int, default=40,
                     help="max payload bytes to print per URB (default 40)")
+    ap.add_argument("--commands", action="store_true",
+                    help="hide standard/class USB chatter; show only vendor "
+                         "control transfers + bulk/interrupt (the protocol)")
     args = ap.parse_args()
 
     fmt = args.format
@@ -230,6 +315,8 @@ def main():
             fmt = "pcapng"
 
     if fmt == "pcapng":
+        recs = parse_pcapng(args.capture)            # native, no tshark
+    elif fmt == "tshark":
         recs = parse_tshark_tsv(run_tshark(args.capture))
     else:
         with open(args.capture, "r", errors="replace") as fh:
@@ -259,27 +346,42 @@ def main():
           + (f" (device {args.device})" if args.device is not None else ""))
     print("# time      type dir ep    detail")
 
+    t0 = min((r.ts for r in recs), default=0.0)
+    pending = {}     # urbid -> originating setup (so completions know it)
     combos = Counter()
     for r in recs:
+        r.ts -= t0
+        # Pair a completion with the setup from its submit.
+        if r.urb == "S" and r.setup is not None and r.urbid is not None:
+            pending[r.urbid] = r.setup
+        eff_setup = r.setup or (pending.get(r.urbid)
+                                if r.urbid is not None else None)
+
+        # --commands: drop standard/class control chatter, keep vendor + data.
+        if args.commands and r.ttype == "CTRL" and not _is_vendor(eff_setup):
+            continue
+
         epname = f"0x{r.ep:02x}" if r.ep is not None else "?"
         detail = ""
         if r.setup:
             detail = decode_setup(r.setup)
             combos[(r.ttype, "ctrl", r.setup.get("bRequest"))] += 1
-        else:
+        elif r.urb != "C":
             combos[(r.ttype, r.direction, r.ep)] += 1
         if r.data:
-            # Only decode a Pakon frame on the command channel (control
-            # transfers) or an exact 36-byte payload — not bulk image data.
-            cmdish = (r.ttype == "CTRL") or (len(r.data) == 36)
-            frame = decode_pakon_frame(r.data) if (cmdish and len(r.data) >= 4) \
-                else None
+            # Decode a Pakon frame only for vendor control transfers or an
+            # exact 36-byte bulk/interrupt payload — never USB descriptors or
+            # bulk image data.
+            cmdish = _is_vendor(eff_setup) or \
+                (r.ttype in ("BULK", "INTR") and len(r.data) == 36)
+            frame = decode_pakon_frame(r.data) if cmdish else None
             shown = r.data[:args.max_data].hex(" ")
             more = "…" if len(r.data) > args.max_data else ""
             detail += (("  " if detail else "")
-                       + (f"[{frame}] " if frame and len(r.data) >= 4 else "")
+                       + (f"[{frame}] " if frame else "")
                        + f"data({len(r.data)}): {shown}{more}")
-        print(f"{r.ts:9.4f} {r.ttype:4} {r.direction:3} {epname:5} "
+        dev = f"d{r.dev}" if r.dev is not None else "d?"
+        print(f"{r.ts:9.4f} {dev:4} {r.ttype:4} {r.direction:3} {epname:5} "
               f"{r.urb} {detail}")
 
     print("\n# distinct transfer/endpoint/request combinations:")

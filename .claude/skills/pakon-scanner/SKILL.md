@@ -124,10 +124,17 @@ propagates to test binaries with correct search dirs.
     usbmon text; prints a URB timeline; **decodes control setup packets (the
     vendor request codes)** and 36-byte Pakon frames; summarizes distinct
     transfer/endpoint/request combos.
-  - **Awaiting:** the human runs a real scan in the VM, captures it, commits to
-    `test/captures/` with timing notes, and runs the analyzer. The summary will
-    reveal the command mechanism (expected: EP0 vendor control) + request codes,
-    unblocking Phase 3 (open handshake) and Phase 5 (scan state machine).
+  - `analyze_capture.py` parses pcapng **natively** (no tshark needed) plus
+    tshark TSV / usbmon text; `--commands` hides standard USB chatter; pairs
+    setup↔completion by URB id; prints a bus/device inventory.
+  - **First capture decoded:** firmware load `f235→f135` is standard FX2 fxload
+    over EP0 — `0xA0` (internal RAM) + `0xA3` (external RAM) + CPUCS `0xE600`
+    reset + `0xA4 wValue=0x00A1` renumerate (see docs/PROTOCOL.md). The
+    operational descriptor is the clean 3-endpoint one (0x01 OUT, 0x81 IN,
+    0x86 IN bulk).
+  - **Still needed:** a capture containing an ACTUAL SCAN on the f135 device —
+    the first capture only caught firmware load + re-enumeration, no command/
+    scan traffic. That capture unblocks Phase 3 (open handshake) and Phase 5.
 
 ## Dev / sync workflow
 

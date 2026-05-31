@@ -27,6 +27,25 @@ the Phase 4 capture. PID still must not be used as a model indicator.
   `PAKON_COLD_VID/PID` in `include/pakon_usb.h` are 0 until confirmed, and the
   firmware-download path hard-refuses to run while they are 0.
 
+## Firmware download (f235 → f135) — decoded from capture
+
+Confirmed from a real capture (`tools/analyze_capture.py`) of the working
+driver loading the bootstrap `0F05:F235` device. Standard two-stage EZ-USB
+FX2 fxload, all over EP0 vendor control transfers:
+
+- `0xA0 wValue=0xE600 data=01` — write CPUCS, hold the 8051 in reset.
+- `0xA0 wValue=0x7F92 data=01` — a firmware-specific byte poked before reset.
+- **391× `0xA0`** writes — to internal 8051 RAM.
+- **711× `0xA3`** writes — to external RAM (the second-stage loader path used
+  for the bulk of the firmware; `0xA3` is implemented by the first-stage code).
+- `0xA4 wValue=0x00A1 wLength=0` — finalize / renumerate trigger; the device
+  then re-enumerates as operational `0F05:F135`.
+- `0xA9 wLength=8` (IN) — an 8-byte readback right after (status/version?).
+
+Implication: standalone firmware load is feasible with the FX35Package `.hex`
+blobs + this sequence (extends our current `0xA0`-only stub to add `0xA3` and
+the `0xA4` finalize). Still TODO: the actual `.hex` provenance/mapping.
+
 ## Command frame (documented)
 
 36-byte fixed frame:
