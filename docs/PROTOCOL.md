@@ -173,10 +173,17 @@ Two independent engines, each with a symmetric start/stop command of the form
 | **CCD readout** (light + sensor → `0x86`) | PICL `0x20` | `04 03 20 00 8a` | `04 03 20 00 92` |
 | **Film transport motor** | PICM `0x24` | `04 03 24 00 a0` | `04 03 24 00 a2` |
 
-- The CCD arm `04 03 20 00 8a` is the only repeated kick (22× / 18×): it's *both*
-  the start and the keep-feeding primitive, re-issued as the FX2 buffer drains,
-  always paired with a host-side arm write `02 04 10 01 84 02` just before it,
-  then a PICL poll `03 01 20`. Each arm is followed by a burst of `0x86` reads.
+- **Re-arms happen ONLY in the preview/calibration phase** (CONFIRMED from a full
+  `--scan --trace-status` run): all 21 `8a` re-arms fire at image-read index
+  ≤ 1325, and the motor start `a0` is at exactly that index. After the motor
+  runs, the **CCD streams continuously with ZERO re-arms** (10,394 reads in the
+  4-frame capture) until the film ends. So `8a` is the per-snapshot arm of the
+  *stationary* preview phase, not a during-scan primitive. **Physical
+  correlation:** while preview/calibration runs the front LED is **orange and
+  blinking**; when it turns **green** the operator feeds the film and the motor
+  only then starts — matching the trace's preview→`a0`→stream structure.
+- Each preview arm is paired with a host-side write `02 04 10 01 84 02` just
+  before it, then a PICL poll `03 01 20`.
 - `04 03 20 00 92` (stop readout) appears **exactly once**, right after the last
   image read; `04 03 24 00 a2` (stop motor) immediately after it. That two-command
   tail is the scan stop, identical in both captures.
@@ -186,24 +193,47 @@ Two independent engines, each with a symmetric start/stop command of the form
   `a0` is therefore the clean split marker between deterministic setup and the
   open-ended image-transfer loop.
 
-### Poll-driven scan state machine — `pakon_replay --scan-sm` (untested on hw)
+### Live poll status — CONFIRMED from `--scan --trace-status`
+
+Status byte (data[1] of a reply) is a **ready/busy flag**:
+
+| value | meaning |
+|---|---|
+| `0x00` | ready / data available — proceed |
+| `0x80` | busy — buffer momentarily starved, keep waiting |
+
+In a full healthy scan HOST `03 01 10` returned `…00` 1041× and `…80` 564×; the
+`0x80` polls cluster at the **end of the roll** (from index ≈11330 onward) as the
+film runs out, then 61× at the final read. PICL `03 01 20` showed the same
+`00`/`80` split (5× busy, right after preview arms); PICM `03 01 24` was always
+`00`. The HOST reply carries a constant trailing byte `0xaa` (a fixed register,
+not a counter). **There is no distinct "done" status** — `0x80` is *busy*, not
+*finished* — which is why end-of-roll white (below) is the done-signal.
+
+### Poll-driven scan state machine — `pakon_replay --scan-sm`
 
 Verbatim `--scan` is locked to the captured image-read count, so it only fits a
-roll the same length as the reference. `--scan-sm` instead replays the
-deterministic setup spine (OPEN → param table → calibration register writes →
-motor start `a0`, none of which we can synthesise) up to the first image read
-after `a0`, then **drives the transfer itself**: read `0x86`; on an empty read,
-poll HOST/PICL/PICM (statuses logged — this also discovers the real protocol
-done-signal) and re-issue the arm pair `02 04 10 01 84 02` + `04 03 20 00 8a`;
-finally send the stop tail `92` + `a2`.
+roll the same length as the reference. `--scan-sm` replays the deterministic
+setup spine (OPEN → param table → calibration register writes → motor start
+`a0`, none synthesisable) up to the first image read after `a0`, then **drives
+the transfer itself**.
 
-**Done-signal = end-of-roll white.** We can't mine the protocol done-signal
-offline (the `.pakscan` stores commands sent, never poll replies). Instead we use
-the image data: the scan ends with the open gate shining through no film
-(samples ≈ 48900, near 16-bit max; film/base/leader is far darker). The loop
-latches `film_seen` on the first non-white chunk, then stops after a sustained
-run of trailing white. Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT`
-90, `SM_TRAIL_WHITE` 8 chunks, `SM_MAX_EMPTY` 8 (safety), plus `--max-mb` cap.
+The image phase **never sends a state-changing command** — re-arms belong to the
+stationary preview phase only (see above), so during the motor-driven stream we
+just read `0x86` and issue read-only HOST polls. The blocking bulk read absorbs
+`0x80` busy (the device NAKs, libusb waits); a real read *timeout* with HOST
+`0x00` ready means nothing is left. (The earlier re-arm-on-empty design wedged
+the command channel by writing into a live stream — removed.)
+
+**Done-signal = end-of-roll white.** We can't mine a protocol done-signal (none
+exists, and the `.pakscan` has no replies). The scan ends with the open gate
+shining through no film (samples ≈ 48900, near 16-bit max; film/base/leader is
+far darker). The loop latches `film_seen` on the first non-white chunk, then
+stops after a sustained run of trailing white. Tunables: `SM_WHITE_THRESH`
+40000, `SM_WHITE_FRAC_PCT` 90, `SM_TRAIL_WHITE` 8; backstops `SM_MAX_EMPTY` 3
+(ready-but-empty reads), `SM_MAX_BUSY` 600 (busy polls w/o data), `--max-mb`. If
+no film is ever detected (stale device / nothing loaded) it warns rather than
+re-arming into a dead stream.
 
 ### Command verbs (EP1, from frequencies)
 

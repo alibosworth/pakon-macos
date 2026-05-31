@@ -424,12 +424,13 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
  * 04 03 24 00 a0 (confirmed). Everything up to the first image read after it is
  * replayed; from there we take over. */
 
-/* Tunables (logged at start; see docs/PROTOCOL.md photometry). */
+/* Tunables (logged at start; see docs/PROTOCOL.md photometry + status notes). */
 #define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
 #define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
 #define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
-#define SM_MAX_EMPTY      8u      /* consecutive empty reads (even re-armed) => done */
-#define SM_REARM_POLLS    200u    /* max PICL ready-polls after a re-arm */
+#define SM_MAX_EMPTY      3u      /* consecutive ready(0x00)-but-empty reads => done */
+#define SM_MAX_BUSY       600u    /* consecutive busy(0x80) polls w/o data => give up */
+#define SM_HOST_BUSY      0x80u   /* HOST status: busy/buffer-starved (else 0x00) */
 
 static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
 
@@ -457,27 +458,34 @@ static pakon_result sm_cmd(pakon_dev *dev, const uint8_t *raw, size_t n,
     return pakon_cmd(dev, &pkt, reply, timeout);
 }
 
-/* The poll-driven image phase: read 0x86, re-arm on empty, stop on end-white. */
+/* The poll-driven image phase.
+ *
+ * CONFIRMED from a full --trace-status scan: re-arming (8a) happens ONLY in the
+ * preview/calibration phase (all 21 re-arms at <= the motor-start read index);
+ * once the motor runs the CCD streams continuously with ZERO re-arms until the
+ * film ends. So here we NEVER send a state-changing command -- we only read
+ * 0x86 and issue read-only HOST status polls. (The earlier re-arm-on-empty
+ * design wedged the bus by writing into a live stream.)
+ *
+ * HOST status: 0x00 = ready, 0x80 = busy (buffer momentarily starved). The
+ * blocking bulk read absorbs busy (device NAKs, libusb waits), so a real read
+ * timeout means no data. On timeout we poll HOST: busy => keep waiting; ready
+ * => nothing left. Primary stop is end-of-roll white. */
 static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_bytes,
-                         unsigned long *nimg, unsigned long *ncmd,
-                         unsigned long *errs, unsigned timeout, unsigned long max_mb)
+                         unsigned long *nimg, unsigned long *ncmd, unsigned long *errs,
+                         unsigned timeout, unsigned long max_mb, int *film_seen_out)
 {
-    /* Re-arm pair + status polls, all confirmed from the scan captures. */
-    const uint8_t host_arm[] = {0x02,0x04,0x10,0x01,0x84,0x02};
-    const uint8_t picl_arm[] = {0x04,0x03,0x20,0x00,0x8a};
     const uint8_t poll_host[] = {0x03,0x01,0x10};
-    const uint8_t poll_picl[] = {0x03,0x01,0x20};
-    const uint8_t poll_picm[] = {0x03,0x01,0x24};
 
     uint8_t buf[20480];
     int film_seen = 0;
-    unsigned trail_white = 0, empty_run = 0;
+    unsigned trail_white = 0, idle = 0, busy = 0;
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
     pakon_packet reply;
 
-    printf("  [sm] image phase: white>%u (>=%u%%), stop after %u trailing-white "
-           "chunks or %u empty reads\n",
-           SM_WHITE_THRESH, SM_WHITE_FRAC_PCT, SM_TRAIL_WHITE, SM_MAX_EMPTY);
+    printf("  [sm] image phase: read 0x86 (no re-arm; CCD armed in setup); stop "
+           "on %u trailing-white chunks, %u ready-empty reads, or %lu MB cap\n",
+           SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
 
     for (;;) {
         size_t got = 0;
@@ -487,7 +495,7 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             fwrite(buf, 1, got, img);
             *img_bytes += got;
             (*nimg)++;
-            empty_run = 0;
+            idle = busy = 0;
             if (sm_chunk_is_white(buf, got)) {
                 if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
                     printf("  [sm] end-of-roll white (%u chunks) after %llu bytes "
@@ -508,34 +516,29 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         }
         if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
 
-        /* Empty read: log where the engines stand, then re-arm and wait. */
+        /* No data this window: ask HOST whether it's still working. Read-only,
+         * so this can never wedge the command channel mid-stream. */
+        uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
-            printf("  [sm] empty read; HOST st=%u", pakon_packet_status(&reply));
-        else { printf("  [sm] empty read; HOST poll err"); (*errs)++; }
-        if (sm_cmd(dev, poll_picm, sizeof(poll_picm), &reply, timeout) == PAKON_OK)
-            printf(" PICM st=%u", pakon_packet_status(&reply));
-        printf("\n");
-        (*ncmd) += 2;
+            st = pakon_packet_status(&reply);
+        else (*errs)++;
+        (*ncmd)++;
 
-        if (++empty_run >= SM_MAX_EMPTY) {
-            printf("  [sm] %u consecutive empty reads -> assuming done\n", empty_run);
+        if (st == SM_HOST_BUSY) {                 /* still feeding -- wait more */
+            if (++busy >= SM_MAX_BUSY) {
+                printf("  [sm] HOST busy for %u polls with no data -> giving up\n", busy);
+                break;
+            }
+            continue;
+        }
+        printf("  [sm] empty read, HOST st=0x%02x (idle %u/%u)\n",
+               st, idle + 1, SM_MAX_EMPTY);
+        if (++idle >= SM_MAX_EMPTY) {             /* ready but nothing left */
+            printf("  [sm] no more image data -> done\n");
             break;
         }
-
-        /* Re-arm the CCD for the next block. */
-        sm_cmd(dev, host_arm, sizeof(host_arm), NULL, timeout);
-        sm_cmd(dev, picl_arm, sizeof(picl_arm), NULL, timeout);
-        (*ncmd) += 2;
-
-        /* Poll PICL until it reports ready (PS_SUCCESS) or we give up. */
-        for (unsigned p = 0; p < SM_REARM_POLLS; p++) {
-            if (sm_cmd(dev, poll_picl, sizeof(poll_picl), &reply, timeout) != PAKON_OK) {
-                (*errs)++; break;
-            }
-            (*ncmd)++;
-            if (pakon_packet_status(&reply) == PS_SUCCESS) break;
-        }
     }
+    if (film_seen_out) *film_seen_out = film_seen;
 }
 
 static int do_scan_sm(const char *script, const char *image_path, unsigned timeout,
@@ -629,9 +632,15 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
         if (!passed_motor_start)
             printf("  [sm] no motor-start (a0) in script; taking over at end of "
                    "script\n");
-        sm_scan_loop(dev, img, &img_bytes, &nimg, &ncmd, &errs, timeout, max_mb);
+        int film_seen = 0;
+        sm_scan_loop(dev, img, &img_bytes, &nimg, &ncmd, &errs, timeout, max_mb,
+                     &film_seen);
+        if (!film_seen)
+            fprintf(stderr, "  [sm] WARNING: no film ever detected in the stream "
+                    "(stale device state / nothing loaded?)\n");
 
-        /* Phase 3: stop the engines (halt readout, then motor). */
+        /* Phase 3: stop the engines (halt readout, then motor). The loop only
+         * issued read-only polls, so the command channel is still alive here. */
         uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
         uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
         sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
