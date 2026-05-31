@@ -41,24 +41,41 @@ def render(args):
     if rows == 0:
         sys.exit("not enough data for one row at this width/offset")
 
-    out = open(args.out, "wb")
     maxval = 65535 if is16 else 255
     magic = "P6" if is_rgb else "P5"
-    out.write(f"{magic}\n{args.width} {rows}\n{maxval}\n".encode())
 
-    if not is16:
-        out.write(data)                # 8-bit: bytes map 1:1 to PNM samples
-    else:
-        # repack samples to big-endian (PNM 16-bit is big-endian)
-        mv = memoryview(data)
-        buf = bytearray(len(data))
-        if little:
-            buf[0::2] = mv[1::2]
-            buf[1::2] = mv[0::2]
-            out.write(buf)
+    if args.transpose:
+        # Rotate 90°: the scan's line axis is across the film, the line-count
+        # axis is along it, so the photo comes out sideways. Needs numpy.
+        try:
+            import numpy as np
+        except ImportError:
+            sys.exit("--transpose needs numpy; otherwise rotate in your viewer")
+        if is_rgb:
+            sys.exit("--transpose currently supports the gray modes only")
+        dt = (("<u2" if little else ">u2") if is16 else "u1")
+        a = np.frombuffer(data, dtype=dt).reshape(rows, args.width)
+        a = a.T.copy()                      # (width, rows)
+        oh, ow = a.shape
+        with open(args.out, "wb") as out:
+            out.write(f"{magic}\n{ow} {oh}\n{maxval}\n".encode())
+            out.write(a.astype(">u2").tobytes() if is16 else a.tobytes())
+        print(f"wrote {args.out}: {ow}x{oh} {args.mode} (transposed)")
+        return
+
+    with open(args.out, "wb") as out:
+        out.write(f"{magic}\n{args.width} {rows}\n{maxval}\n".encode())
+        if not is16:
+            out.write(data)                # 8-bit: bytes map 1:1 to PNM samples
         else:
-            out.write(data)
-    out.close()
+            mv = memoryview(data)          # repack to big-endian for PNM
+            if little:
+                buf = bytearray(len(data))
+                buf[0::2] = mv[1::2]
+                buf[1::2] = mv[0::2]
+                out.write(buf)
+            else:
+                out.write(data)
     print(f"wrote {args.out}: {args.width}x{rows} {args.mode} "
           f"({rows} lines from offset {args.offset})")
 
@@ -121,6 +138,8 @@ def main():
     ap.add_argument("--lines", type=int, default=1200,
                     help="rows to render (0 = all; default 1200)")
     ap.add_argument("--offset", type=int, default=0, help="skip leading bytes")
+    ap.add_argument("--transpose", action="store_true",
+                    help="rotate 90° (scan ribbon comes out sideways); gray modes")
     ap.add_argument("-o", "--out", default="scan.pnm")
     ap.add_argument("--guess-stride", action="store_true")
     ap.add_argument("--sample", type=int, default=8 << 20,
