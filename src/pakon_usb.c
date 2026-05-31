@@ -34,6 +34,8 @@ struct pakon_ctx {
 
 struct pakon_dev {
     libusb_device_handle *handle;
+    uint16_t vid;
+    uint16_t pid;
     pakon_endpoint endpoints[MAX_ENDPOINTS];
     size_t n_endpoints;
     /* claimed interface, etc. filled in Phase 2 */
@@ -70,9 +72,17 @@ void pakon_usb_exit(pakon_ctx *ctx)
     free(ctx);
 }
 
+int pakon_is_warm_id(uint16_t vid, uint16_t pid)
+{
+    return vid == PAKON_WARM_VID &&
+           (pid == PAKON_WARM_PID_F135 ||
+            pid == PAKON_WARM_PID_F235 ||
+            pid == PAKON_WARM_PID_F335);
+}
+
 static int is_warm(const struct libusb_device_descriptor *d)
 {
-    return d->idVendor == PAKON_WARM_VID && d->idProduct == PAKON_WARM_PID;
+    return pakon_is_warm_id(d->idVendor, d->idProduct);
 }
 
 /* Cold match is only meaningful once the IDs are confirmed (post STOP POINT A).
@@ -199,12 +209,14 @@ pakon_result pakon_usb_open(pakon_ctx *ctx, pakon_dev **out_dev)
         return PAKON_ERR_USB;
 
     libusb_device *match = NULL;
+    struct libusb_device_descriptor md = {0};
     for (ssize_t i = 0; i < n; i++) {
         struct libusb_device_descriptor d;
         if (libusb_get_device_descriptor(list[i], &d) != 0)
             continue;
         if (is_warm(&d)) {
             match = list[i];
+            md = d;
             break;
         }
     }
@@ -220,6 +232,8 @@ pakon_result pakon_usb_open(pakon_ctx *ctx, pakon_dev **out_dev)
         libusb_free_device_list(list, 1);
         return PAKON_ERR_USB;
     }
+    dev->vid = md.idVendor;
+    dev->pid = md.idProduct;
 
     int rc = libusb_open(match, &dev->handle);
     if (rc != 0) {
@@ -250,6 +264,14 @@ void pakon_usb_close(pakon_dev *dev)
     if (dev->handle)
         libusb_close(dev->handle);
     free(dev);
+}
+
+void pakon_usb_dev_ids(const pakon_dev *dev, uint16_t *vid, uint16_t *pid)
+{
+    if (!dev)
+        return;
+    if (vid) *vid = dev->vid;
+    if (pid) *pid = dev->pid;
 }
 
 pakon_result pakon_usb_endpoints(pakon_dev *dev, pakon_endpoint *eps,
@@ -370,8 +392,8 @@ pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *hex_path)
     }
 
     pakon_logf(PAKON_LOG_INFO,
-               "firmware sent; waiting for re-enumeration to %04x:%04x",
-               PAKON_WARM_VID, PAKON_WARM_PID);
+               "firmware sent; waiting for re-enumeration to a warm %04x:Fx35",
+               PAKON_WARM_VID);
     /* Re-enumeration polling is finished in the post-STOP-POINT-A work. */
     return PAKON_OK;
 }

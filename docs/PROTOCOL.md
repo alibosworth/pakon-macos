@@ -6,7 +6,10 @@ marked **TBD** or **inferred** — do not treat inferred items as ground truth.
 
 ## Identities
 
-- **Warm (post-firmware):** `0F05:F135`, 3 endpoints. *(documented)*
+- **Warm (post-firmware):** `0F05:Fxxx` where the PID encodes the model —
+  `F135` (F-135), `F235` (F-235), `F335` (F-335). Class `0xff` (vendor-specific).
+  **Verified on hardware:** an F-235 enumerates as `0F05:F235`. *(documented +
+  observed)*
 - **Cold (FX2 bootloader):** **TBD** — confirm via `lsusb` (Linux) or
   `pakon_probe --list` / `system_profiler SPUSBDataType` (macOS) on a freshly
   powered scanner before any driver loads (Phase 1, STOP POINT A). Not guessed:

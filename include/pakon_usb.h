@@ -23,9 +23,18 @@
 extern "C" {
 #endif
 
-/* Warm (post-firmware) Pakon identity — documented, treated as known-good. */
-#define PAKON_WARM_VID   0x0F05
-#define PAKON_WARM_PID   0xF135
+/*
+ * Warm (post-firmware) Pakon identity. The VID is constant; the PID encodes
+ * the model number (confirmed on real hardware: an F-235 enumerates as
+ * 0F05:F235). All members of the F-x35 family are treated as warm.
+ */
+#define PAKON_WARM_VID        0x0F05
+#define PAKON_WARM_PID_F135   0xF135   /* Pakon F-135 */
+#define PAKON_WARM_PID_F235   0xF235   /* Pakon F-235 (verified hardware) */
+#define PAKON_WARM_PID_F335   0xF335   /* Pakon F-335 */
+
+/* True if vid:pid is a known warm Pakon (any F-x35 model). */
+int pakon_is_warm_id(uint16_t vid, uint16_t pid);
 
 /*
  * Cold (pre-firmware, FX2 bootloader) identity. UNKNOWN until confirmed via
@@ -38,7 +47,7 @@ extern "C" {
 typedef enum {
     PAKON_DEV_UNKNOWN = 0,
     PAKON_DEV_COLD,    /* FX2 bootloader, needs firmware download */
-    PAKON_DEV_WARM     /* 0F05:F135, ready for the protocol layer */
+    PAKON_DEV_WARM     /* 0F05:Fx35, ready for the protocol layer */
 } pakon_dev_class;
 
 /* Summary of one device on the bus, for the diagnostic listing that helps
@@ -100,6 +109,9 @@ pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *hex_path);
 
 pakon_result pakon_usb_open(pakon_ctx *ctx, pakon_dev **out_dev);
 void         pakon_usb_close(pakon_dev *dev);
+
+/* VID/PID of the opened device (e.g. to report the model). */
+void pakon_usb_dev_ids(const pakon_dev *dev, uint16_t *vid, uint16_t *pid);
 
 /*
  * Copy up to `max` endpoint descriptors of the open device into `eps`; the

@@ -34,11 +34,24 @@ static void usage(const char *argv0)
  * Diagnostic only — NOT used by any matching/classification logic. */
 static const char *device_hint(unsigned vid, unsigned pid)
 {
-    if (vid == PAKON_WARM_VID && pid == PAKON_WARM_PID)
-        return "  <-- warm Pakon (0F05:F135)";
+    if (pakon_is_warm_id((uint16_t)vid, (uint16_t)pid))
+        return "  <-- warm Pakon (F-x35)";
+    if (vid == PAKON_WARM_VID)
+        return "  <-- Pakon vendor (unrecognized PID)";
     if (vid == 0x04b4 || vid == 0x0547)
         return "  <-- Cypress/Anchor vendor: possible FX2 bootloader?";
     return "";
+}
+
+/* Map a warm PID to its model name for friendlier output. */
+static const char *pakon_model(uint16_t pid)
+{
+    switch (pid) {
+    case PAKON_WARM_PID_F135: return "F-135";
+    case PAKON_WARM_PID_F235: return "F-235";
+    case PAKON_WARM_PID_F335: return "F-335";
+    }
+    return "unknown model";
 }
 
 static int do_list(pakon_ctx *ctx)
@@ -83,6 +96,10 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
         fprintf(stderr, "open warm device failed: %s\n", pakon_result_str(r));
         return 1;
     }
+
+    uint16_t vid = 0, pid = 0;
+    pakon_usb_dev_ids(dev, &vid, &pid);
+    printf("opened %04x:%04x (Pakon %s)\n", vid, pid, pakon_model(pid));
 
     pakon_endpoint eps[8];
     size_t n = 0;
@@ -166,8 +183,7 @@ int main(int argc, char **argv)
     if (r == PAKON_ERR_NO_DEVICE) {
         printf("no device\n");
     } else if (r == PAKON_OK && cls == PAKON_DEV_WARM) {
-        printf("found warm Pakon (%04x:%04x)\n",
-               PAKON_WARM_VID, PAKON_WARM_PID);
+        printf("found warm Pakon device\n");
         exit_code = dump_warm_endpoints(ctx);
     } else if (r == PAKON_OK && cls == PAKON_DEV_COLD) {
         printf("found cold FX2 device (needs firmware)\n");
