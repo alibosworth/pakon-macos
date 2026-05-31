@@ -41,7 +41,7 @@ TSHARK_FIELDS = [
     "frame.number", "frame.time_relative",
     "usb.bus_id", "usb.device_address", "usb.endpoint_address",
     "usb.transfer_type", "usb.urb_type",
-    "usb.setup.bmRequestType", "usb.setup.bRequest",
+    "usb.bmRequestType", "usb.setup.bRequest",
     "usb.setup.wValue", "usb.setup.wIndex", "usb.setup.wLength",
     "usb.capdata",
 ]
