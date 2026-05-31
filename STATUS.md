@@ -4,7 +4,16 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
+_Last updated: 2026-05-31._
+
+**Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
+code and pulled **239,984,640 image bytes** (4-frame strip, 11719 reads, only 2
+late transfer errors). Next: decode geometry → render `scan.raw`. Use
+`tools/raw2pnm.py` (`--guess-stride` to find bytes/line via numpy autocorrelation,
+or `--width N` to render an 8-bit-gray band and eyeball alignment). Geometry
+hints from CONFIGURE: PICM reg writes incl. values ~3098 / ~2043 (candidate
+width/height); chunk size 20480. Determine channels (likely RGB) + bit depth
+(8 or 16) from the working stride.
 
 ## Phase status
 
