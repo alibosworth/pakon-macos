@@ -6,9 +6,10 @@ variants). Unofficial, clean-room reimplementation built from documented
 protocol notes and our own USB captures.
 
 > **Status:** Phases 0–5 complete. Full end-to-end scan works on hardware —
-> firmware load, open handshake, scan drive, and image decode are all
-> validated on Linux and macOS. Phase 6 is a native Swift macOS app (IOKit
-> transport, SwiftUI, no SANE dependency). SANE backend for Linux follows.
+> firmware load, open handshake, film advance, scan drive, and image decode
+> are all validated on Linux and macOS. Phase 6 is a native Swift macOS app
+> (IOKit transport, SwiftUI, no SANE dependency). SANE backend for Linux
+> follows.
 >
 > The decoder handles both the 4-frame and whole-roll scan modes, including
 > Digital ICE IR channel removal, wrap-order de-interleaving, and per-zone
@@ -71,12 +72,15 @@ Two file types drive the process:
   committed here because it contains Kodak firmware bytes — see
   `firmware/README.md`.
 
-- **`.pakscan`** — a scan operation list extracted from a USB capture of the
-  Windows driver performing a scan. It contains the ordered sequence of
-  commands, control transfers, and image reads that the driver sends.
-  `pakon_replay --scan` replays this verbatim against the live scanner to drive
-  a real scan. Generate it from a capture with
-  `analyze_capture.py --extract-scan`.
+- **`.pakscan`** — an operation script extracted from a USB capture of the
+  Windows driver. Two kinds:
+  - **Scan script** — ordered sequence of commands, control transfers, and
+    image reads. `pakon_replay --scan` replays it verbatim to drive a real
+    scan. Generate with `analyze_capture.py --extract-scan`.
+  - **Advance script** — motor command sequence for film transport.
+    `pakon_replay advance.pakscan` replays it and then loops the
+    start/poll/finalize sequence for as many frames as needed. Generate by
+    capturing an advance operation and extracting with `analyze_capture.py`.
 
 ### Step-by-step
 
@@ -109,7 +113,22 @@ The scanner re-enumerates as `0f05:f135`. Confirm with `--list`.
 
 Should print `OK` for each step and reach `Idle`.
 
-**4. Run a scan**
+**4. Advance film**
+
+To transport film to the desired position (e.g. to the first frame):
+
+```sh
+./build/pakon_replay advance.pakscan            # advance 1 frame
+./build/pakon_replay advance.pakscan --steps N  # advance N frames
+```
+
+Each step sends the start command, polls until the scanner signals the frame
+is in position, then sends the finalize command. `--limit SEC` sets a
+wall-clock safety cap (default 60 s). The advance duration (how far each step
+moves the film) is set by the TLX software in seconds and is encoded in the
+`.pakscan` script.
+
+**5. Run a scan**
 
 Load film into the scanner, then:
 
@@ -120,7 +139,7 @@ Load film into the scanner, then:
 Streams ~240 MB per 4-frame strip, or ~1.2 GB for a whole roll. A couple of
 transfer errors at the very end are normal.
 
-**5. Decode the image**
+**6. Decode the image**
 
 Requires Python 3, `numpy`, and ImageMagick (`magick`).
 
