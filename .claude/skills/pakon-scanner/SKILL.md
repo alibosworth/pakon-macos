@@ -174,15 +174,17 @@ propagates to test binaries with correct search dirs.
     Sample under analysis on the Mac: `/Volumes/Video/scan.raw`.
 - **Image decoding — layout CONFIRMED interleaved** (see docs/PROTOCOL.md +
   STATUS.md). 16-bit LE, line stride 8000 samples (16000 B), ~14999 lines,
-  **per-pixel interleaved RGB** (lag-3/6/9 autocorrelation; planar split
-  anti-correlates) ⇒ 2666 px wide, order RGB, ribbon rotated 90°, 4 frames along
-  the line axis. **This supersedes the old plane-sequential guess** (`raw2pnm.py
-  --planar`); `tools/pakon_image.py` is the correct decoder. `--autocrop`
-  (default) strips leader + blank no-film pre/post scan + gate margin.
-  - **Q1 ghosting — SOLVED:** trilinear CCD. Per-line "restart at R" is correct
-    (no phase drift); R/G/B sensor lines are spaced 8 scan-lines apart (order
-    G/B/R), so register `R[y], B[y-8], G[y-16]` (auto-measured). Shipped as
-    `pakon_image.py --register` (default on).
+  **per-pixel interleaved** (lag-3/6/9 autocorrelation; planar split
+  anti-correlates) ⇒ 2666 px wide, **interleave order B,R,G** (pos0=Blue,
+  1=Red, 2=Green — green is the middle trilinear line; confirmed by skin tones),
+  ribbon rotated 90°, 4 frames along the line axis. **This supersedes the old
+  plane-sequential guess** (`raw2pnm.py --planar`); `tools/pakon_image.py` is the
+  correct decoder. `--autocrop` (default) strips leader + blank no-film pre/post
+  scan + gate margin.
+  - **Q1 ghosting — SOLVED:** trilinear CCD. Per-line "restart" is correct
+    (no phase drift); the sensor lines are spaced 8 scan-lines apart (order
+    B(0)/G(+8)/R(+16)), so register the three to a common position
+    (auto-measured). Shipped as `pakon_image.py --register` (default on).
   - **Q2 sense — ANSWERED: NOT pre-inverted.** Transmission-sense (no-film open
     gate ≈ 48900 max, dark leader ≈ 520); it's a raw negative and the black
     rebate is the *correct* result of inverting one. The magenta is the C-41

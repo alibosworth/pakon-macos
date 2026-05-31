@@ -183,9 +183,13 @@ Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
   deinterleaving gives balanced channel correlation (R~G .59 / R~B .90 /
   G~B .56) whereas a planar split anti-correlates one "channel" (−0.08). This
   **supersedes** the earlier plane-sequential guess (old `raw2pnm.py --planar`).
-- Working geometry: 8000 ∤ 3, so model = **2 pad samples/line, RGB restarts at
-  R each line ⇒ 2666 px wide** (unconfirmed — see Open Q1).
-- **Channel order RGB**: the orange film base at col 0 reads R≈27k / G,B≈5k.
+- Working geometry: 8000 ∤ 3, so model = **2 pad samples/line, the triple
+  restarts each line ⇒ 2666 px wide** (per-line restart confirmed: every row's
+  best phase = 0).
+- **Interleave order B,R,G** (position 0 = Blue, 1 = Red, 2 = Green), NOT RGB.
+  Green is the middle trilinear line; red passes most through the orange mask,
+  blue is most absorbed. Confirmed by natural skin tones across all 6 channel
+  permutations of a real frame (wrong orders give green or "lomography purple").
 - Ribbon is rotated 90°; the **4 frames lie along the long (line) axis**.
 - Structure along the ribbon: dark leader, then a **blank "no-film" scan** (the
   feed runs before the strip loads — bright + colour-neutral), then the 4
@@ -194,10 +198,10 @@ Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
   isolates the film.
 
 **Resolved photometric/alignment questions (2026-05-31), see STATUS.md:**
-- **Q1 ghosting — trilinear CCD.** The per-line "restart at R" is correct (no
-  phase drift); the R/G/B sensor lines are spaced along the scan, so channels
-  are offset by **8 lines each** (R lags B by 8, G by 16; order G/B/R). Register
-  `R[y], B[y-8], G[y-16]` → fringing gone. `pakon_image.py --register`.
+- **Q1 ghosting — trilinear CCD.** The per-line "restart" is correct (no phase
+  drift); the R/G/B sensor lines are spaced **8 lines apart** along the scan
+  (order **B(0), G(+8), R(+16)**), so register the three to a common position →
+  fringing gone. `pakon_image.py --register` (auto-measures).
 - **Q2 sense — NOT pre-inverted.** Transmission-sense confirmed: no-film open
   gate ≈ 48900 (max), dark leader ≈ 520. It's a raw negative; the black rebate
   is the correct result of inverting a negative. The magenta cast is the C-41

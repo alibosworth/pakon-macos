@@ -22,7 +22,11 @@ code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
 - 8000 isn't a multiple of 3, so the working model is **2 padding samples per
   line and RGB restarts at R each line → 2666 px wide** (`(8000//3)` triples).
   ⚠️ see OPEN Q1 — this per-line phase reset is the suspected cause of ghosting.
-- Channel order **RGB**: the orange film base at col 0 reads R≈27k / G,B≈5k.
+- **Interleave order B,R,G** (position 0 = Blue, 1 = Red, 2 = Green), NOT RGB.
+  Green is the middle trilinear line; red is the channel that passes most
+  through the orange mask (rebate transmission), blue the most absorbed
+  (darkest). Confirmed by natural skin tones across all 6 permutations of a real
+  frame (the wrong orders give green or "lomography purple" skin).
 - Ribbon comes out rotated 90°; 4 frames stacked along the long (line) axis.
 
 **Anatomy of `scan.raw`** (rows, from `autocrop`): dark leader 0–513; **blank
@@ -42,10 +46,11 @@ the per-line "restart at R" model is correct (period-3 power in per-row channel
 means = 0; every row's best phase = 0). The real cause is a **trilinear CCD** —
 R/G/B sensor lines are spaced along the scan direction, so the channels are
 offset in scan lines. Measured by inter-channel vertical cross-correlation:
-feature at R row y appears in **B at y-8 and G at y-16** (8-line spacing, sensor
-order G/B/R). Fix: co-register `R[y], B[y-8], G[y-16]` → edge fringing gone,
-residual offset 0. Implemented as `pakon_image.py --register` (default on,
-auto-measures the leads; `--reg-leads G,B` to force, `--no-register` to disable).
+sensor order along the scan is **B (0), G (+8), R (+16) lines** (positions
+p0/p2/p1; 8-line spacing). Fix: co-register the three lines to a common position
+→ edge fringing gone, residual offset 0. Implemented as `pakon_image.py
+--register` (default on, auto-measures the leads; `--reg-leads G,B` to force,
+`--no-register` to disable).
 
 **Q2 — magenta / "black rebate" — ANSWERED (2026-05-31): stream is NOT
 pre-inverted.** Photometric refs prove transmission-sense (more light → higher

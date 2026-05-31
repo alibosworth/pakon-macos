@@ -4,15 +4,19 @@ pakon_image.py — decode a Pakon raw scan stream into 16-bit RGB TIFF(s).
 
 The captured 0x86 image stream (pakon_replay --scan output) is, on this F-135:
   - 16-bit little-endian samples,
-  - per-pixel INTERLEAVED RGB (confirmed: column autocorrelation peaks at
-    lag 3/6/9), so samples run R,G,B,R,G,B,...
+  - per-pixel interleaved (column autocorrelation peaks at lag 3/6/9), in the
+    order **B, R, G** — i.e. samples run B,R,G,B,R,G,... NOT R,G,B. Green is
+    the middle trilinear line (position 2), red is position 1, blue position 0;
+    confirmed by natural skin tones across all 6 channel permutations of a real
+    frame (the wrong orders give green or "lomography purple" skin).
   - `--linewidth` samples per scan line (default 8000 = 16000-byte stride),
     giving width = linewidth//3 px (~2666); the last 0-2 samples are padding.
 
 The sensor is **trilinear** (separate R/G/B lines spaced along the scan
 direction), so the three channels are offset by a few scan lines and show
 colour ghosting at edges if naively combined. By default it **co-registers**
-them (auto-measured lead per channel, ~G+16/B+8 lines on this F-135);
+them (auto-measured; lines are spaced ~8 apart, order B/G/R along the scan, so
+green and blue lead red by ~8 and ~15 lines on this F-135);
 `--no-register` disables it, `--reg-leads G,B` forces the offsets.
 
 By default it **autocrops** the ribbon: a real scan begins with a dark leader
@@ -65,9 +69,11 @@ def _vlead(ch, ref, rng=40, rowstep=1, colstep=3):
 def register_channels(chans, leads):
     """Co-register trilinear R/G/B planes given each channel's lead (in lines)
     relative to R. Output row y takes chans[c][y - lead_c]; all planes are
-    cropped to the common valid span. Returns (aligned dict, new line count)."""
-    m = max(leads.values())
-    L = next(iter(chans.values())).shape[0] - m
+    cropped to the common valid span. `lead_c` is how far ahead channel c is vs
+    R; offsets may be negative when R is not the leading line. Returns (aligned
+    dict, new line count)."""
+    m, lo = max(leads.values()), min(leads.values())
+    L = next(iter(chans.values())).shape[0] - (m - lo)
     out = {c: chans[c][m - leads[c]: m - leads[c] + L] for c in chans}
     return out, L
 
@@ -173,7 +179,10 @@ def main():
     img = raw[:lines * lw].reshape(lines, lw)
 
     n3 = (lw // 3) * 3
-    chans = {"r": img[:, 0:n3:3], "g": img[:, 1:n3:3], "b": img[:, 2:n3:3]}
+    # Interleave order is B,R,G: position 0 = B, position 1 = R, position 2 = G
+    # (green is the middle trilinear line). Verified by skin-tone test across all
+    # 6 permutations of a real frame.
+    chans = {"r": img[:, 1:n3:3], "g": img[:, 2:n3:3], "b": img[:, 0:n3:3]}
 
     if args.register:
         if args.reg_leads:
