@@ -218,12 +218,16 @@ setup spine (OPEN → param table → calibration register writes → motor star
 `a0`, none synthesisable) up to the first image read after `a0`, then **drives
 the transfer itself**.
 
-The image phase **never sends a state-changing command** — re-arms belong to the
-stationary preview phase only (see above), so during the motor-driven stream we
-just read `0x86` and issue read-only HOST polls. The blocking bulk read absorbs
-`0x80` busy (the device NAKs, libusb waits); a real read *timeout* with HOST
-`0x00` ready means nothing is left. (The earlier re-arm-on-empty design wedged
-the command channel by writing into a live stream — removed.)
+The image phase reads `0x86` and **re-arms on every empty window** with the pair
+`02 04 10 01 84 02` + `04 03 20 00 8a`. This is empirically required (the
+re-arm-less version never streamed once a real green→feed gap was present): when
+the film isn't streaming continuously the readout needs the arm to produce the
+next block, exactly as the preview phase does. It does NOT contradict the trace
+— in the reference capture the film fed continuously, so there were no empty
+reads and hence no mid-scan re-arms; re-arm only fires across gaps and at the
+ends. If a re-arm write ever fails (command channel unresponsive) the loop
+**aborts cleanly** instead of spinning (the old 200×-poll spin is what wedged
+the bus on a stale device).
 
 **Done-signal = end-of-roll white.** We can't mine a protocol done-signal (none
 exists, and the `.pakscan` has no replies). The scan ends with the open gate

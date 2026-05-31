@@ -476,6 +476,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
                          unsigned timeout, unsigned long max_mb, int *film_seen_out)
 {
     const uint8_t poll_host[] = {0x03,0x01,0x10};
+    const uint8_t host_arm[]  = {0x02,0x04,0x10,0x01,0x84,0x02};
+    const uint8_t picl_arm[]  = {0x04,0x03,0x20,0x00,0x8a};
 
     uint8_t buf[20480];
     int film_seen = 0;
@@ -484,8 +486,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     pakon_packet reply;
 
     printf("  [sm] image phase: feed the film now. Waiting up to ~%u s for it, "
-           "then reading 0x86 (no re-arm); stop on %u trailing-white chunks, "
-           "%u empty windows after film, or %lu MB cap\n",
+           "reading 0x86 and re-arming on empty; stop on %u trailing-white "
+           "chunks, %u empty windows after film, or %lu MB cap\n",
            SM_LOAD_WAIT * (SCAN_IMG_TIMEOUT_MS / 1000), SM_TRAIL_WHITE,
            SM_MAX_EMPTY, max_mb);
 
@@ -518,23 +520,32 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         }
         if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
 
-        /* A full read window (SCAN_IMG_TIMEOUT_MS) elapsed with zero bytes. The
-         * blocking bulk read already absorbs transient 0x80 busy (device NAKs,
-         * libusb waits within the window), so an empty window means no data.
-         * What that MEANS depends on whether film has been seen yet -- the two
-         * look identical on the wire (HOST 0x80 busy, empty reads):
-         *   - before film: the operator is still feeding the film (the gate is
-         *     empty and the CCD streams nothing until film arrives). Wait.
-         *   - after film: the film has passed the gate -> end of roll. Stop
-         *     promptly; do NOT keep waiting on busy or the motor ejects the film.
-         */
+        /* A full read window (SCAN_IMG_TIMEOUT_MS) elapsed with zero bytes.
+         * Poll HOST (read-only) for the log, then RE-ARM the CCD. Re-arming on
+         * empty is empirically required: across the green->feed gap and whenever
+         * the film isn't streaming continuously, the readout needs the arm pair
+         * to produce the next block (this is the same arming the preview phase
+         * does). When film DOES stream continuously there are no empty reads, so
+         * this never fires mid-scan -- matching the trace. */
         uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
             st = pakon_packet_status(&reply);
         else (*errs)++;
-        (*ncmd)++;
+
+        pakon_result ra = sm_cmd(dev, host_arm, sizeof(host_arm), NULL, timeout);
+        pakon_result rb = sm_cmd(dev, picl_arm, sizeof(picl_arm), &reply, timeout);
+        (*ncmd) += 3;
+        if (ra != PAKON_OK || rb != PAKON_OK) {
+            /* The command channel stopped accepting writes -- bail cleanly
+             * instead of spinning (the old failure mode that wedged the bus). */
+            fprintf(stderr, "  [sm] command channel unresponsive on re-arm "
+                    "(%s/%s) -> aborting\n", pakon_result_str(ra), pakon_result_str(rb));
+            (*errs)++;
+            break;
+        }
+
         idle++;
-        if (!film_seen) {
+        if (!film_seen) {                 /* operator still feeding the film */
             if (idle >= SM_LOAD_WAIT) {
                 fprintf(stderr, "  [sm] no film fed within ~%u s -> aborting\n",
                         idle * (SCAN_IMG_TIMEOUT_MS / 1000));
@@ -544,6 +555,9 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
                    idle, SM_LOAD_WAIT, st);
             continue;
         }
+        /* Film already scanned and now no data -> end of roll. Stop promptly so
+         * the motor doesn't run the film out (white detection above is the
+         * faster primary stop). */
         printf("  [sm] empty read after film, HOST st=0x%02x (idle %u/%u)\n",
                st, idle, SM_MAX_EMPTY);
         if (idle >= SM_MAX_EMPTY) {
