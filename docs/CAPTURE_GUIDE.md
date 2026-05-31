@@ -1,8 +1,11 @@
-# Capture guide (Phase 4)
+# Capture guide (Phase 4 — complete)
 
-Goal: record the **working driver** driving the scanner so we can decode the
-undocumented init/command/scan path (we proved in Phase 2 that the device NAKs
-raw bulk, so the protocol is something we must observe, not guess).
+Phase 4 is done: the protocol is fully decoded and validated on hardware.
+This guide is kept as a reference for making new captures (different models,
+resolutions, or failure modes).
+
+Original goal: record the **working driver** driving the scanner to decode the
+undocumented init/command/scan path.
 
 This guide targets the available setup: a **Linux host running a Windows VM
 with the scanner passed through**. The win here is that passed-through USB URBs

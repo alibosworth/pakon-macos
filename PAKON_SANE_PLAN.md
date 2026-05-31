@@ -255,22 +255,25 @@ and use on Linux from the README alone.
 
 ## Standing risks to keep visible
 
-- **Image-stream format is undocumented** (Phase 5). If on-device correction makes raw
-  output unusable, we may need to decode Pakon's correction or accept raw + post-process.
-- **macOS USB claiming**: a default class driver may grab the interface; may need detach,
-  an Info.plist, or running the frontend with elevated rights. Test early (Phase 2).
-- **Cold-boot VID/PID unknown** until I run lsusb (Phase 1, STOP POINT A). Don't hardcode a
-  guess.
-- **Checksum algorithm** is inferred from sample packets; validate hard in Phase 3 before
-  trusting it for scan commands.
-- **Single-tester hardware**: only the model(s) I physically have can be validated; mark
-  everything else "theoretical" in the support matrix.
+- ~~**Image-stream format is undocumented** (Phase 5).~~ **Resolved.** Format fully
+  decoded: 16-bit LE, B,R,G interleaved, trilinear CCD co-registered. Raw negative
+  output; C-41 inversion left to dedicated tools.
+- ~~**macOS USB claiming**.~~ **Resolved.** macOS works without sudo and without any
+  Info.plist or driver detach — libusb claims the interface cleanly (tested 2026-05-31).
+- ~~**Cold-boot VID/PID unknown**.~~ **Resolved.** Cold = `0F05:F235`, warm = `0F05:F135`.
+- ~~**Checksum algorithm** inferred.~~ **Resolved.** Short frames carry no checksum; the
+  trailing byte is a command param. Confirmed from the full 2218-command capture set.
+- **Single-tester hardware**: only the F-135 has been validated; F-235/F-335/Plus remain
+  theoretical. Mark clearly in the support matrix.
+- **Phase 6 SANE claiming on macOS**: the backend will need to claim the USB interface
+  from within the SANE framework — test early; the standalone libusb path works but
+  the SANE plugin context may differ.
 
 ## What I (the human) must provide, and when
 
-- Phase 1: cold-boot VID/PID via lsusb; run firmware-load test.
-- Phase 3: run the open-handshake replay; paste traces.
-- Phase 4: perform Windows scan captures; commit them.
-- Phase 5–6: run scan replays and `scanimage`; paste output / share image files.
-- Throughout: a physical scanner, a Windows environment (real or VM w/ USB passthrough)
-  for the reference captures, and both a Linux and a macOS machine for the two targets.
+- ~~Phase 1: cold-boot VID/PID; firmware-load test.~~ Done.
+- ~~Phase 3: open-handshake replay trace.~~ Done.
+- ~~Phase 4: Windows scan captures.~~ Done.
+- ~~Phase 5: scan replay + image decode.~~ Done (Linux + macOS).
+- **Phase 6**: run `scanimage -d pakon` end-to-end on Linux, then macOS.
+- Throughout: a physical scanner and both a Linux and a macOS machine.

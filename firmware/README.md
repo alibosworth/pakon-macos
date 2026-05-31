@@ -44,9 +44,6 @@ verified to bring up the specific hardware on hand:
 
 | Model            | HEX file   | Verified |
 |------------------|------------|----------|
-| Pakon F-135      | f135.hex   | no       |
+| Pakon F-135      | f135.pakfw | yes (Linux + macOS, `.pakfw` route) |
 | F-235 / F-335    | (TBD)      | no       |
 | "Plus" variants  | (TBD)      | no       |
-
-> No `.hex` is committed yet — it is added in Phase 1 alongside the firmware
-> download implementation, with its exact source path recorded above.

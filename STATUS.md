@@ -4,7 +4,7 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31._
+_Last updated: 2026-05-31 (Mac test added)._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
@@ -89,9 +89,9 @@ frame, so resampling may be wanted. Then Phase 6 (SANE backend).
   analyze_capture.py` parses pcapng natively. Captures live on the Linux box;
   the scan capture was copied to this Mac at `/Volumes/Video/pakon_scan.pcapng`
   (the firmware-only one at `/Volumes/Video/pakon_full.pcapng`).
-- **Phase 5 (scan state machine + image):** scan operation-replay IMPLEMENTED
-  (`--extract-scan` + `pakon_replay --scan`), not yet run on hardware. We drive
-  the scan ourselves and read `0x86`, so no in-VM image capture needed.
+- **Phase 5 (scan state machine + image):** DONE and **VALIDATED ON HARDWARE**
+  (Linux + macOS). `pakon_replay --scan` drives a real scan; `pakon_image.py`
+  decodes the output to 16-bit RGB TIFFs with registration and autocrop.
 - **Phase 6 (SANE backend), 7 (hardening):** not started.
 
 ## Confirmed hardware/protocol facts (from real captures)
@@ -148,33 +148,26 @@ sudo ./build/pakon_probe            # warm f135 + endpoints 0x01/0x81/0x86
 sudo ./build/pakon_replay --open    # reaches Idle
 ```
 
-## Phase 5 — scan replay IMPLEMENTED, awaiting hardware run
+## Phase 5 — scan replay DONE, validated on Linux and macOS
 
-Scan flow mapped (docs/PROTOCOL.md): OPEN → PARAM READ (0xA4/0xA9) → CONFIGURE
-(PICL/PICM register writes + polls) → SCAN (interleaved status polls + `0x86`
-20480-byte image reads; ~240 MB / 4 frames; commands interleaved with reads).
+Scan flow: OPEN → PARAM READ (0xA4/0xA9) → CONFIGURE (PICL/PICM register
+writes + polls) → SCAN (interleaved status polls + `0x86` 20480-byte image
+reads; ~240 MB / 4 frames). Confirmed on both Linux and macOS: 239,984,640
+bytes, 11719 image reads, 2 late transfer errors (normal, ignored).
 
-Built (operation-replay; no safety gates, per request):
-- `analyze_capture.py --extract-scan OUT.pakscan` — emits the operational
-  device's ordered op list: `O <hex>` (EP1 cmd+reply), `M <n>` (read n image
-  bytes from 0x86), `C ...` (0xA4/0xA9 control). Verified 2218 O / 11719 M / 32 C.
+- `analyze_capture.py --extract-scan OUT.pakscan` — emits the ordered op list:
+  `O <hex>` (EP1 cmd+reply), `M <n>` (image read), `C ...` (0xA4/0xA9 control).
+  Verified 2218 O / 11719 M / 32 C.
 - `pakon_usb_control()` — generic EP0 control transfer (for 0xA4/0xA9).
 - `pakon_replay --scan FILE [--image OUT]` — replays each op, writing `0x86`
-  payloads to a raw image file (default pakon_scan.raw). Image-read timeout 5 s.
+  payloads to a raw image file. Image-read timeout 5 s.
 
-### NEXT: run it on hardware (LOAD FILM FIRST)
+To run a scan: load film, ensure device is operational `f135`, then:
 
 ```sh
-git pull origin main && cmake --build build
-python3 tools/analyze_capture.py /tmp/pakon_scan.pcapng --extract-scan scan.pakscan
-# device must be operational f135 on the host (firmware-load first if it's f235)
-# LOAD FILM, then:
-sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw
+sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # Linux
+./build/pakon_replay --scan scan.pakscan --image scan.raw       # macOS
 ```
-Then inspect `scan.raw` size/structure to decode geometry/bit-depth/frame
-boundaries. Verbatim replay mirrors the known-good driver sequence; watch/listen
-to the transport. A poll-until-ready state machine is the more robust follow-up
-(vs verbatim poll counts).
 
 ## Handy commands
 
@@ -186,7 +179,12 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on
 python3 tools/analyze_capture.py <cap.pcapng> --bus 1               # inventory + timeline
 python3 tools/analyze_capture.py <cap.pcapng> --bus 1 --device N --commands
 
-# on the scanner box
-sudo ./build/pakon_probe                 # classify + endpoint map (needs sudo)
-sudo ./build/pakon_replay --open         # needs operational f135 on the host
+# on the scanner box (Linux needs sudo; macOS does not)
+sudo ./build/pakon_probe                         # classify + endpoint map
+sudo ./build/pakon_probe --load-firmware f135.pakfw   # cold f235 → warm f135
+sudo ./build/pakon_replay --open                 # open handshake to Idle
+sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # full scan
+
+# decode
+python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4
 ```
