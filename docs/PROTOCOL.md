@@ -7,8 +7,11 @@ marked **TBD** or **inferred** — do not treat inferred items as ground truth.
 ## Identities
 
 - **Warm (post-firmware):** `0F05:F135`, 3 endpoints. *(documented)*
-- **Cold (FX2 bootloader):** **TBD** — confirm via `lsusb` on a freshly powered
-  scanner before any driver loads (Phase 1, STOP POINT A). Not guessed.
+- **Cold (FX2 bootloader):** **TBD** — confirm via `lsusb` (Linux) or
+  `pakon_probe --list` / `system_profiler SPUSBDataType` (macOS) on a freshly
+  powered scanner before any driver loads (Phase 1, STOP POINT A). Not guessed:
+  `PAKON_COLD_VID/PID` in `include/pakon_usb.h` are 0 until confirmed, and the
+  firmware-download path hard-refuses to run while they are 0.
 
 ## Command frame (documented)
 

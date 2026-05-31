@@ -5,8 +5,11 @@ for the Kodak/Pakon **F-135** film scanner (and the "Plus" / F-235 / F-335
 variants). This is an unofficial, clean-room reimplementation built from
 documented protocol notes and our own USB captures.
 
-> **Status: Phase 0 (scaffold).** Only the build skeleton, logging, and the
-> framing struct/enums exist. Nothing talks to hardware yet. See
+> **Status: Phase 1 (transport), paused at STOP POINT A.** Build skeleton,
+> logging, framing struct/enums (Phase 0), plus real USB enumeration, a
+> device-listing diagnostic, warm-device open + endpoint dump, an Intel HEX
+> parser (unit-tested), and the FX2 firmware-download pipeline — the last is
+> gated until the scanner's *cold* VID/PID is confirmed on real hardware. See
 > `PAKON_SANE_PLAN.md` for the full phased plan.
 
 ## Architecture
@@ -50,9 +53,19 @@ tools, and the `test_proto` unit test.
 ## Trying it (Phase 0)
 
 ```sh
-./build/pakon_probe          # prints "no device" with nothing attached
+./build/pakon_probe          # classify; prints "no device" with nothing attached
+./build/pakon_probe --list   # dump every USB device (use this for STOP POINT A)
 PAKON_DEBUG=4 ./build/pakon_probe   # with full trace logging
 ```
+
+### STOP POINT A (Phase 1, hardware)
+
+Before the firmware-download path can be enabled, the scanner's **cold**
+(pre-firmware, FX2 bootloader) USB VID/PID must be confirmed on real hardware —
+it must not be guessed. Power-cycle the scanner and, *before any driver loads*,
+run `pakon_probe --list` (or `lsusb` / `system_profiler SPUSBDataType`) and note
+the new device's `vid:pid`. That value then goes into `PAKON_COLD_VID/PID` in
+`include/pakon_usb.h`, after which `pakon_probe --load-firmware <f.hex>` can run.
 
 `PAKON_DEBUG` ranges `0` (errors only, default) to `4` (trace; every packet
 hexdumped).

@@ -41,6 +41,16 @@ typedef enum {
     PAKON_DEV_WARM     /* 0F05:F135, ready for the protocol layer */
 } pakon_dev_class;
 
+/* Summary of one device on the bus, for the diagnostic listing that helps
+ * confirm the cold VID/PID at STOP POINT A. */
+typedef struct {
+    uint16_t vid;
+    uint16_t pid;
+    uint8_t  bus;
+    uint8_t  address;
+    uint8_t  dev_class;     /* bDeviceClass */
+} pakon_usb_devinfo;
+
 /* Opaque transport context (wraps libusb_context). */
 typedef struct pakon_ctx pakon_ctx;
 
@@ -62,10 +72,21 @@ void         pakon_usb_exit(pakon_ctx *ctx);
 /* ---- enumeration / classification (Phase 1) ---- */
 
 /*
- * Scan the bus and report whether a cold or warm Pakon is present. STUB.
- * `out_class` is set to PAKON_DEV_UNKNOWN when nothing matches.
+ * Scan the bus and report whether a cold or warm Pakon is present.
+ * `out_class` is set to PAKON_DEV_UNKNOWN when nothing matches; the call then
+ * returns PAKON_ERR_NO_DEVICE. A warm match uses the documented 0F05:F135
+ * identity; a cold match is only possible once PAKON_COLD_VID/PID is filled in
+ * after STOP POINT A (it is 0 until then, so cold never matches yet).
  */
 pakon_result pakon_usb_find(pakon_ctx *ctx, pakon_dev_class *out_class);
+
+/*
+ * Diagnostic: copy up to `max` device summaries for everything on the bus into
+ * `arr`, writing the real count to `*out_count`. Used by `pakon_probe --list`
+ * to identify the scanner's cold VID/PID before it is hardcoded anywhere.
+ */
+pakon_result pakon_usb_list(pakon_ctx *ctx, pakon_usb_devinfo *arr,
+                            size_t max, size_t *out_count);
 
 /* ---- firmware download (Phase 1) ---- */
 

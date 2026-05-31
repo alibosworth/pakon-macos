@@ -18,6 +18,7 @@ pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 add_library(pakon STATIC
   src/pakon_log.c
   src/pakon_proto.c
+  src/pakon_hex.c
   src/pakon_usb.c
 )
 target_include_directories(pakon PUBLIC ${CMAKE_SOURCE_DIR}/include)
@@ -38,6 +39,10 @@ enable_testing()
 add_executable(test_proto test/test_proto.c)
 target_link_libraries(test_proto PRIVATE pakon)
 add_test(NAME test_proto COMMAND test_proto)
+
+add_executable(test_hex test/test_hex.c)
+target_link_libraries(test_hex PRIVATE pakon)
+add_test(NAME test_hex COMMAND test_hex)
 
 # NOTE: the SANE backend (backend/pakon.c) is built in Phase 6 against an
 # installed sane-backends; it is intentionally not a target yet.

@@ -6,3 +6,6 @@
 # editor / OS cruft
 .DS_Store
 *.swp
+
+# local Claude Code state
+.claude/
