@@ -296,6 +296,13 @@ Tasks:
 - **IOKit bulk transfer reliability**: IOKit `IOUSBPipe` bulk I/O has its own quirks
   (packet sizing, timeouts, stall clearing). Validate early against the real scanner
   before building the full app on top of it.
+- **Dual-tap CCD colour seam (full-roll scan mode)**: The whole-roll scan mode uses
+  a wider CCD readout that includes a Digital ICE IR channel (~658 px, neutral
+  grayscale, constant down the roll). The IR band sits mid-line and the two visible
+  halves come from opposite CCD taps with different per-channel gain (L/R ratio ≈
+  R:0.60, G:1.33, B:1.15), producing a hard colour seam. Spatial de-wrap and
+  per-zone trilinear registration are implemented; colour calibration across the seam
+  is **not yet implemented** — needs a new scan for clean verification.
 
 ## What I (the human) must provide, and when
 

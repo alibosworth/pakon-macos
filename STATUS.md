@@ -4,7 +4,7 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31 (Mac test added)._
+_Last updated: 2026-05-31 (full-roll decode session)._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
@@ -69,7 +69,93 @@ keep emitting the registered+cropped raw negative for dedicated film software
 
 TODO after Q1/Q2: frame-boundary auto-detection (gaps); pixels may be non-square
 (across-sensor oversampled vs motor step) — Pakon's own output is 3000×2000/
-frame, so resampling may be wanted. Then Phase 6 (SANE backend).
+frame, so resampling may be wanted. Then Phase 6 (Swift macOS app).
+
+---
+
+## Full-roll scan decode — findings (2026-05-31)
+
+Full roll scan: `/Volumes/Video/fullroll.raw` (1.2 GB, 83311 lines, 24 frames).
+Processed with `pakon_image.py --rotate 90 --frames 24 --resample-to 3000x2000`.
+
+### Scan line layout: `[visible | IR]` with optional wrap
+
+Each scan line is **8000 samples = 2666 RGB pixels**, laid out as:
+`[visible image (~2008 px) | IR channel (~658 px)]`
+
+The **IR channel** is a **Digital ICE** channel for dust/scratch removal:
+- Perfectly colour-neutral: R=G=B≈32k (a monochrome IR pass stored in all three
+  sample slots).
+- ~658 px wide, constant brightness down the entire roll.
+- Rendered alone it shows the full scene as a grayscale image with dust specks
+  and high-frequency edge detail.
+
+**Buffer offset / wrap:** depending on scan mode, the IR band may sit at the
+*end* of the line (4-frame scan: cols 2008–2665) or in the *middle* (full-roll
+scan: cols 1261–1919). When mid-line, the visible image is wrapped — the two
+visible halves are spatially contiguous **at the sensor wrap seam** (col
+2665↔col 0, measured continuity corr=0.992) not at the IR-adjacent edges
+(corr=0.51). Reassemble in **wrap order: [after-IR | before-IR]**.
+
+| Scan | IR cols | Visible cols | Wrap? |
+|------|---------|-------------|-------|
+| `scan.raw` (4-frame) | 2008–2665 | 0–2007 | No (IR at edge) |
+| `fullroll.raw` (24-frame) | 1261–1919 | 1920–2665 + 0–1260 | Yes |
+
+### Per-zone trilinear registration
+
+The wrap-split halves come from **opposite ends of the sensor readout** and
+require **different R/G/B line leads** — using one global lead leaves one half
+ghosted (±24 lines mis-registered, strong red/cyan edge fringing):
+
+| Zone | G lead | B lead |
+|------|--------|--------|
+| Right visible (after-IR, 1920–2665) | −8 | −16 |
+| Left visible (before-IR, 0–1260) | +16 | +8 |
+
+The right zone matches `scan.raw`'s single-zone leads exactly. `pakon_image.py`
+now measures and applies leads per-zone via `measure_leads()` / `register_zones()`.
+
+### ⚠️ OPEN: dual-tap colour calibration mismatch
+
+The two visible halves have different **per-channel gain** (dual-tap CCD readout,
+each tap has its own analogue calibration):
+
+- Left/right seam-adjacent column means differ by per-channel ratio ≈ R:0.60, G:1.33, B:1.15
+- This produces a hard **tint seam** down the middle of every full-roll frame
+  (left half magenta, right half cyan)
+- A per-channel linear fit (gain+offset) across the seam boundary maps left→right
+  correctly at the seam (`a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets)
+- **Not yet implemented** in `pakon_image.py` — needs testing on a scan where the
+  frame boundary is away from the seam position, and ideally on a scan with a
+  uniform subject (sky/wall) for verification
+- **Recommendation:** capture a new scan (single or short roll) and verify the
+  seam fix on clean content before baking into the decoder
+
+### Aspect ratio
+
+Raw pixels are **non-square**: ~95 steps/mm along film, ~83 px/mm across CCD.
+Fix: `--resample-to 3000x2000` (Lanczos, `!`-forced exact size via ImageMagick).
+Without resampling, the full-roll frames are ~3430×2007 ≈ 1.7:1 (wrong).
+With `--resample-to 3000x2000`: correct 3:2 = 2:3 portrait / landscape. ✓
+
+### Frame boundary detection
+
+`pakon_image.py --frames N` now uses per-row detail valley detection (smoothed
+std-across-columns profile, local minima near expected spacing). Works well for
+`scan.raw` 4-frame. Still approximate for the 24-frame full-roll — some cuts
+land slightly off the inter-frame gap. Needs further work; for now the user can
+inspect and re-run with adjusted spacing if needed.
+
+### pakon_image.py current command
+
+```sh
+python3 tools/pakon_image.py /Volumes/Video/fullroll.raw \
+    --rotate 90 --frames 24 --resample-to 3000x2000 -o output/frame
+```
+
+Output: `output/frame_1.tif` … `output/frame_24.tif`, 3000×2000 16-bit RGB
+raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
 
 ## Phase status
 
