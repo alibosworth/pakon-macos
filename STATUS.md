@@ -4,7 +4,7 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31 (full-roll decode session)._
+_Last updated: 2026-05-31 (advance protocol session)._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
@@ -256,6 +256,24 @@ sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # Linux
 ./build/pakon_replay --scan scan.pakscan --image scan.raw       # macOS
 ```
 
+## Film advance — confirmed protocol (2026-05-31)
+
+`advance.pakscan` captures one advance operation from the Windows driver.
+Decoded structure: PICL motor-init writes → PICM enable + duration write →
+`a0` (start) → HOST polls until `PS_SUCCESS` (frame in position) → `a2`
+(finalize/stop). `pakon_replay` now drives this natively:
+
+```sh
+./build/pakon_replay advance.pakscan            # 1 step, 60 s limit
+./build/pakon_replay advance.pakscan --steps N  # N frame advances
+./build/pakon_replay advance.pakscan --steps N --limit SEC
+```
+
+The `02 05 24 02 a5 1c 25` write sets the advance duration; the TLX UI accepts
+this in **seconds** — exact binary encoding TBD from captures at known
+durations. See `docs/PROTOCOL.md § Film advance protocol` for the full command
+table.
+
 ## Handy commands
 
 ```sh
@@ -271,6 +289,7 @@ sudo ./build/pakon_probe                         # classify + endpoint map
 sudo ./build/pakon_probe --load-firmware f135.pakfw   # cold f235 → warm f135
 sudo ./build/pakon_replay --open                 # open handshake to Idle
 sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # full scan
+./build/pakon_replay advance.pakscan --steps N   # advance N frames
 
 # decode
 python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4

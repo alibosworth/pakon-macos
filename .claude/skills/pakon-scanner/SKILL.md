@@ -191,6 +191,14 @@ propagates to test binaries with correct search dirs.
     **orange mask**; proper fix is mask-aware/density-space inversion (dedicated
     film software, or an optional in-tool mode — naive `max-raw` can't do it).
   - A poll-until-ready state machine is the robust follow-up to verbatim replay.
+- **Film advance protocol CONFIRMED from `advance.pakscan` capture.**
+  - PICL motor-init writes → PICM enable + duration write (`02 05 24 02 a5 1c 25`)
+    → `04 03 24 00 a0` (start) → poll HOST (`03 01 10`) until `PS_SUCCESS` (frame
+    in position) → `04 03 24 00 a2` (finalize/stop).
+  - Duration parameter bytes `[a5 1c 25]` encode seconds (TLX UI input); exact
+    binary encoding TBD from captures at known durations.
+  - `pakon_replay advance.pakscan [--steps N] [--limit SEC]` drives N frame
+    advances. Each step = `a0` → HOST poll loop → `a2`. `--steps` defaults to 1.
 
 ## Dev / sync workflow
 

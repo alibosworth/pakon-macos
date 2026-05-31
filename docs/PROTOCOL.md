@@ -210,3 +210,57 @@ Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
 
 Note: film is **motor-fed whole rolls** — design CANCEL to let the feed finish,
 not hard-abort.
+
+## Film advance protocol — confirmed from `advance.pakscan` capture
+
+The advance operation (film transport between frames) uses PICM (`0x24`) and
+PICL (`0x20`) over the same EP1 command channel as scanning.
+
+### Command sequence for one advance step
+
+```
+# --- setup (sent once before the first step) ---
+01 03 20 01 02          PICL reg 0x01 = 0x02   (motor init)
+01 03 20 1e 90          PICL reg 0x1e = 0x90
+01 03 20 01 83          PICL reg 0x01 = 0x83
+01 03 20 02 84          PICL reg 0x02 = 0x84
+01 03 20 04 88          PICL reg 0x04 = 0x88
+01 03 24 01 02          PICM reg 0x01 = 0x02   (PICM enable)
+02 05 24 02 a5 1c 25    PICM reg 0x02 = [a5 1c 25]   ← advance duration (see below)
+03 01 24                poll PICM status
+
+# --- per-step (repeat for each frame advance) ---
+04 03 24 00 a0          PICM command 0xa0 — START advance
+03 01 10                poll HOST (type=0x03, data=[AD_HOST])
+... (repeat HOST polls until reply status byte = PS_SUCCESS = 0x00)
+                        ← PS_SUCCESS on HOST = frame in position
+04 03 24 00 a2          PICM command 0xa2 — FINALIZE/STOP advance
+```
+
+### Key commands
+
+| Wire bytes             | Meaning |
+|------------------------|---------|
+| `04 03 24 00 a0`       | Start one advance step (motor on) |
+| `04 03 24 00 a2`       | Finalize/stop advance (motor park) |
+| `03 01 10` → `… 00`   | HOST status poll; `data[1]=0x00` (PS_SUCCESS) = frame in position |
+| `03 01 24`             | PICM status poll |
+
+### Advance duration parameter (`02 05 24 02 a5 1c 25`)
+
+The three bytes `[0xa5, 0x1c, 0x25]` written to PICM register `0x02` encode the
+advance duration. The TLX Windows software accepts this value in **seconds** from
+the user — the exact binary encoding (fixed-point, BCD, or raw integer in some
+unit) is **TBD** from additional captures at known durations.
+
+### `pakon_replay` advance mode
+
+```sh
+./build/pakon_replay advance.pakscan            # 1 step, 60 s limit
+./build/pakon_replay advance.pakscan --steps N  # N steps (frames)
+./build/pakon_replay advance.pakscan --steps N --limit SEC
+```
+
+Each "step" = `a0` (start) → poll HOST until `PS_SUCCESS` (frame in position)
+→ `a2` (finalize). `--limit SEC` is a wall-clock safety cap (default 60 s);
+`--timeout MS` is the USB per-transfer timeout (default 1000 ms).
