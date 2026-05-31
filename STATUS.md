@@ -4,7 +4,7 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31 (advance protocol session)._
+_Last updated: 2026-05-31 (MacPakon Swift app + image processing pipeline)._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
@@ -189,7 +189,9 @@ raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
     `0x86` stays empty). Making it length-independent needs the **cadence** of
     those housekeeping commands reverse-engineered (when the device expects each),
     best done from a capture. Until then, prefer verbatim `--scan`.
-- **Phase 6 (Swift macOS app):** not started. **Current priority.**
+- **Phase 6 (Swift macOS app):** **IN PROGRESS.** `MacPakon/` Xcode project
+  (macOS 26, no sandbox, IOUSBHost). Full scan + firmware-load + image-processing
+  pipeline implemented — see below.
 - **Phase 7 (SANE backend / Linux), 8 (hardening):** not started.
 
 ## Confirmed hardware/protocol facts (from real captures)
@@ -284,6 +286,51 @@ The `02 05 24 02 a5 1c 25` write sets the advance duration; the TLX UI accepts
 this in **seconds** — exact binary encoding TBD from captures at known
 durations. See `docs/PROTOCOL.md § Film advance protocol` for the full command
 table.
+
+## Phase 6 — MacPakon Swift app (2026-05-31)
+
+`MacPakon/` is an Xcode 26 project (target macOS 26, no App Sandbox,
+IOUSBHost). Builds and runs today. Layers:
+
+**Scan flow (working):**
+- `ObjC/PakonUSBTransport` — IOUSBHost transport: detects cold (F235) and
+  warm (F135) devices, opens full interface+bulk pipes for scan, or device-only
+  for firmware load.
+- `Scan/PakscanScript` — parses `.pakscan` files (O/M/C ops).
+- `Scan/PakonProto` — wire frame encode/decode + confirmed open handshake.
+- `Scan/PakonScanSession` — verbatim replay with end-of-roll autostop (same
+  white-detection as `pakon_replay.c`); replays teardown tail on early stop.
+- `Model/ScannerModel` — polls connection state every 1.5 s, drives scan on
+  background task, publishes bytes received.
+- Bundled resources: `36frames.pakscan` (default scan script), `advance.pakscan`,
+  `f135.pakfw` (firmware load script).
+
+**Firmware load flow (implemented, needs hardware test):**
+- `Scan/PakonFirmwareSession` — parses `.pakfw`, opens cold device, replays
+  1104 EP0 control transfers, tolerates late USB errors (device re-enumerates
+  mid-sequence), polls for warm device up to 10 s.
+- UI shows orange badge when F235 detected, "Load firmware" button auto-loads
+  bundled `f135.pakfw`, progress bar, transitions to warm state.
+
+**Image processing flow (implemented, needs hardware test):**
+- `Decode/PakonDecoder` — full port of `pakon_image.py` algorithms in Swift:
+  deinterleave (B/R/G interleave), IR band detection, per-zone trilinear
+  registration (Pearson cross-correlation), RGB assembly, autocrop, frame
+  boundary detection. Output: 16-bit `RGBRibbon`.
+- `Decode/DecoderModel` — async pipeline with step/progress publishing.
+- `Export/TIFFExporter` — 16-bit linear-sRGB TIFF via `CGImageDestination`.
+- `UI/Processing/ProcessingView` — second window: open raw file, frame count
+  stepper, decoding progress, scrollable grid of frame thumbnails.
+- `UI/Processing/CropEditorView` — per-frame crop editor with 4-corner drag
+  handles; applies crop back into `frame.region` before export.
+- "Process…" button in scan-done alert opens the processing window.
+
+**Open items for Phase 6:**
+- Hardware test of firmware load and scan on real F135.
+- Dual-tap gain seam fix (left/right half colour mismatch on full-roll scans —
+  see STATUS.md § dual-tap calibration).
+- Aspect-ratio resampling to 3000×2000 (currently exports raw pixel geometry).
+- `--rotate 90` for correct portrait orientation (raw ribbon is sideways).
 
 ## Handy commands
 
