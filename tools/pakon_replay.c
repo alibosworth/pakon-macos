@@ -378,34 +378,288 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
     return rc;
 }
 
+/* ---- Phase 5b: poll-driven scan state machine ----------------------------
+ *
+ * Verbatim replay locks the scan to the captured image-read count, so it only
+ * works for a roll the same length as the reference capture. The state machine
+ * replays just the deterministic SETUP spine (OPEN -> param table -> the
+ * calibration-derived register writes -> motor start, all of which we cannot
+ * synthesise) and then DRIVES the image transfer itself, reading 0x86 and
+ * re-arming the CCD until the film has fully passed.
+ *
+ * Done-signal: we cannot mine it offline (the .pakscan stores commands sent,
+ * never the poll replies, and test/captures is empty), so we use the IMAGE
+ * data: the scan ends with the open gate shining through no film (samples near
+ * the 16-bit max, ~48900; film -- even clear base/leader -- is far darker). We
+ * latch "film seen" on the first non-white chunk, then stop once we have seen a
+ * sustained run of end-of-roll white. Every status poll is logged so a hardware
+ * run also reveals the real protocol done-signal for a future tightening.
+ *
+ * Split marker between replay and takeover = the motor-start command
+ * 04 03 24 00 a0 (confirmed). Everything up to the first image read after it is
+ * replayed; from there we take over. */
+
+/* Tunables (logged at start; see docs/PROTOCOL.md photometry). */
+#define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
+#define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
+#define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
+#define SM_MAX_EMPTY      8u      /* consecutive empty reads (even re-armed) => done */
+#define SM_REARM_POLLS    200u    /* max PICL ready-polls after a re-arm */
+
+static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
+
+/* Is a freshly read 0x86 chunk dominated by open-gate white (no film)? */
+static int sm_chunk_is_white(const uint8_t *buf, size_t got)
+{
+    size_t samples = got / 2;
+    if (samples == 0) return 0;
+    size_t white = 0;
+    for (size_t i = 0; i + 1 < got; i += 2) {
+        unsigned v = (unsigned)buf[i] | ((unsigned)buf[i + 1] << 8);
+        if (v > SM_WHITE_THRESH) white++;
+    }
+    return white * 100u >= samples * SM_WHITE_FRAC_PCT;
+}
+
+/* Build + send a frame whose wire bytes are raw[0..n) (raw[0]=type,[1]=count,
+ * [2..]=data). Reads (and discards) the reply on EP1 IN. */
+static pakon_result sm_cmd(pakon_dev *dev, const uint8_t *raw, size_t n,
+                           pakon_packet *reply, unsigned timeout)
+{
+    (void)n;   /* count is carried in raw[1]; n is the caller's sizeof sanity */
+    pakon_packet pkt;
+    pakon_packet_build(&pkt, raw[0], raw + 2, raw[1]);
+    return pakon_cmd(dev, &pkt, reply, timeout);
+}
+
+/* The poll-driven image phase: read 0x86, re-arm on empty, stop on end-white. */
+static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_bytes,
+                         unsigned long *nimg, unsigned long *ncmd,
+                         unsigned long *errs, unsigned timeout, unsigned long max_mb)
+{
+    /* Re-arm pair + status polls, all confirmed from the scan captures. */
+    const uint8_t host_arm[] = {0x02,0x04,0x10,0x01,0x84,0x02};
+    const uint8_t picl_arm[] = {0x04,0x03,0x20,0x00,0x8a};
+    const uint8_t poll_host[] = {0x03,0x01,0x10};
+    const uint8_t poll_picl[] = {0x03,0x01,0x20};
+    const uint8_t poll_picm[] = {0x03,0x01,0x24};
+
+    uint8_t buf[20480];
+    int film_seen = 0;
+    unsigned trail_white = 0, empty_run = 0;
+    unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
+    pakon_packet reply;
+
+    printf("  [sm] image phase: white>%u (>=%u%%), stop after %u trailing-white "
+           "chunks or %u empty reads\n",
+           SM_WHITE_THRESH, SM_WHITE_FRAC_PCT, SM_TRAIL_WHITE, SM_MAX_EMPTY);
+
+    for (;;) {
+        size_t got = 0;
+        pakon_result r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, buf, sizeof(buf),
+                                        &got, SCAN_IMG_TIMEOUT_MS);
+        if (got) {
+            fwrite(buf, 1, got, img);
+            *img_bytes += got;
+            (*nimg)++;
+            empty_run = 0;
+            if (sm_chunk_is_white(buf, got)) {
+                if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
+                    printf("  [sm] end-of-roll white (%u chunks) after %llu bytes "
+                           "-> film fully scanned\n", trail_white, *img_bytes);
+                    break;
+                }
+            } else {
+                if (!film_seen)
+                    printf("  [sm] film detected at %llu bytes\n", *img_bytes);
+                film_seen = 1;
+                trail_white = 0;
+            }
+            if (max_bytes && *img_bytes >= max_bytes) {
+                printf("  [sm] hit safety cap %lu MB -> stopping\n", max_mb);
+                break;
+            }
+            continue;
+        }
+        if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
+
+        /* Empty read: log where the engines stand, then re-arm and wait. */
+        if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
+            printf("  [sm] empty read; HOST st=%u", pakon_packet_status(&reply));
+        else { printf("  [sm] empty read; HOST poll err"); (*errs)++; }
+        if (sm_cmd(dev, poll_picm, sizeof(poll_picm), &reply, timeout) == PAKON_OK)
+            printf(" PICM st=%u", pakon_packet_status(&reply));
+        printf("\n");
+        (*ncmd) += 2;
+
+        if (++empty_run >= SM_MAX_EMPTY) {
+            printf("  [sm] %u consecutive empty reads -> assuming done\n", empty_run);
+            break;
+        }
+
+        /* Re-arm the CCD for the next block. */
+        sm_cmd(dev, host_arm, sizeof(host_arm), NULL, timeout);
+        sm_cmd(dev, picl_arm, sizeof(picl_arm), NULL, timeout);
+        (*ncmd) += 2;
+
+        /* Poll PICL until it reports ready (PS_SUCCESS) or we give up. */
+        for (unsigned p = 0; p < SM_REARM_POLLS; p++) {
+            if (sm_cmd(dev, poll_picl, sizeof(poll_picl), &reply, timeout) != PAKON_OK) {
+                (*errs)++; break;
+            }
+            (*ncmd)++;
+            if (pakon_packet_status(&reply) == PS_SUCCESS) break;
+        }
+    }
+}
+
+static int do_scan_sm(const char *script, const char *image_path, unsigned timeout,
+                      unsigned long max_mb)
+{
+    FILE *fp = fopen(script, "r");
+    if (!fp) { fprintf(stderr, "cannot open scan script '%s'\n", script); return 1; }
+
+    pakon_ctx *ctx = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK) { fclose(fp); return 1; }
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open device failed: %s (need operational f135)\n",
+                pakon_result_str(r));
+        fclose(fp); pakon_usb_exit(ctx); return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev); fclose(fp); pakon_usb_exit(ctx); return 1;
+    }
+
+    FILE *img = fopen(image_path, "wb");
+    if (!img) {
+        fprintf(stderr, "cannot open image '%s'\n", image_path);
+        pakon_usb_release(dev); pakon_usb_close(dev); fclose(fp);
+        pakon_usb_exit(ctx); return 1;
+    }
+
+    char line[1024];
+    uint8_t buf[65536];
+    unsigned long ncmd = 0, nimg = 0, errs = 0;
+    unsigned long long img_bytes = 0;
+    int rc = 0, passed_motor_start = 0, took_over = 0;
+
+    /* Phase 1: replay the deterministic setup spine, including preview/cal
+     * image reads, up to the first image read AFTER motor start. */
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0') continue;
+
+        if (*p == 'O') {
+            int n = hexbytes(p + 1, buf, sizeof(buf));
+            if (n < 0) { fprintf(stderr, "bad O line\n"); rc = 1; break; }
+            /* Note the motor-start marker before the reply overwrites buf. */
+            int is_motor_start = ((size_t)n == sizeof(SM_MOTOR_START) &&
+                                  memcmp(buf, SM_MOTOR_START, n) == 0);
+            size_t sent = 0;
+            r = pakon_usb_send(dev, PAKON_EP_CMD_OUT, buf, (size_t)n, &sent, timeout);
+            if (r == PAKON_OK) {
+                size_t got = 0;
+                r = pakon_usb_recv(dev, PAKON_EP_CMD_IN, buf, sizeof(buf), &got, timeout);
+            }
+            if (r != PAKON_OK) errs++;
+            ncmd++;
+            if (is_motor_start) {
+                passed_motor_start = 1;
+                printf("  [sm] motor start (a0) replayed at cmd %lu\n", ncmd);
+            }
+        } else if (*p == 'M') {
+            if (passed_motor_start) {           /* hand off to the poll loop */
+                printf("  [sm] setup replayed (%lu cmds); taking over scan\n", ncmd);
+                took_over = 1;
+                break;
+            }
+            unsigned long want = strtoul(p + 1, NULL, 0);
+            if (want > sizeof(buf)) want = sizeof(buf);
+            size_t got = 0;
+            r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, buf, want, &got, SCAN_IMG_TIMEOUT_MS);
+            if (got) { fwrite(buf, 1, got, img); img_bytes += got; }
+            if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) errs++;
+            nimg++;
+        } else if (*p == 'C') {
+            unsigned brt, breq, wval, widx, wlen; int consumed = 0;
+            if (sscanf(p + 1, "%x %x %x %x %x%n", &brt,&breq,&wval,&widx,&wlen,&consumed) != 5) {
+                fprintf(stderr, "bad C line\n"); rc = 1; break;
+            }
+            int dn = hexbytes(p + 1 + consumed, buf, sizeof(buf));
+            if (dn < 0) dn = 0;
+            size_t got = 0;
+            r = pakon_usb_control(dev, (uint8_t)brt, (uint8_t)breq, (uint16_t)wval,
+                                  (uint16_t)widx, buf, (uint16_t)wlen, &got, timeout);
+            if (r != PAKON_OK) errs++;
+        }
+    }
+    fclose(fp);
+
+    /* Phase 2: poll-driven image transfer until end-of-roll white. */
+    if (!rc) {
+        if (!passed_motor_start)
+            printf("  [sm] no motor-start (a0) in script; taking over at end of "
+                   "script\n");
+        sm_scan_loop(dev, img, &img_bytes, &nimg, &ncmd, &errs, timeout, max_mb);
+
+        /* Phase 3: stop the engines (halt readout, then motor). */
+        uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
+        uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
+        sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
+        sm_cmd(dev, stop_motor,   sizeof(stop_motor),   NULL, timeout);
+        ncmd += 2;
+        printf("  [sm] sent stop (readout 92, motor a2)\n");
+    }
+    (void)took_over;
+
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+    fclose(img);
+    printf("\nscan-sm done: %lu commands, %lu image reads, %llu image bytes "
+           "-> %s (%lu transfer errors)\n",
+           ncmd, nimg, img_bytes, image_path, errs);
+    return rc;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s FILE.pakscan [--steps N] [--limit SEC] advance film\n"
-        "       %s --scan FILE [--image OUT] [--drain]   full scan replay\n"
+        "       %s --scan FILE [--image OUT] [--drain]   verbatim scan replay\n"
+        "       %s --scan-sm FILE [--image OUT] [--max-mb N]  poll-driven scan\n"
         "       %s --open                                verify open handshake\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
         "  --open        replay the captured open handshake, verify replies\n"
-        "  --scan FILE   replay a .pakscan scan script (produces image data)\n"
-        "  --image OUT   raw image output for --scan (default pakon_scan.raw)\n"
+        "  --scan FILE   replay a .pakscan scan script verbatim (fixed length)\n"
+        "  --scan-sm FILE  replay setup spine, then drive the image transfer and\n"
+        "                  stop on end-of-roll white (any roll length)\n"
+        "  --image OUT   raw image output for --scan/--scan-sm (default pakon_scan.raw)\n"
         "  --drain       after the scan script ends, keep reading 0x86 until done\n"
+        "  --max-mb N    --scan-sm safety cap on image bytes (default 512, 0=off)\n"
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
 {
     int want_open = 0, drain = 0;
     const char *scan_file = NULL;
+    const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
     const char *image_path = "pakon_scan.raw";
     unsigned timeout = 1000;
     unsigned limit_sec = 60;
     unsigned long steps_count = 1;
+    unsigned long max_mb = 512;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -415,6 +669,10 @@ int main(int argc, char **argv)
             want_open = 1;
         } else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {
             scan_file = argv[++i];
+        } else if (!strcmp(argv[i], "--scan-sm") && i + 1 < argc) {
+            scan_sm_file = argv[++i];
+        } else if (!strcmp(argv[i], "--max-mb") && i + 1 < argc) {
+            max_mb = strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--image") && i + 1 < argc) {
             image_path = argv[++i];
         } else if (!strcmp(argv[i], "--drain")) {
@@ -434,13 +692,15 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!want_open && !scan_file && !advance_file) {
+    if (!want_open && !scan_file && !scan_sm_file && !advance_file) {
         usage(argv[0]);
         return 2;
     }
 
     if (advance_file)
         return do_advance(advance_file, timeout, limit_sec, steps_count);
+    if (scan_sm_file)
+        return do_scan_sm(scan_sm_file, image_path, timeout, max_mb);
     if (scan_file)
         return do_scan(scan_file, image_path, timeout, drain);
     return do_open(timeout);

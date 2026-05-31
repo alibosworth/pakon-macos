@@ -163,6 +163,48 @@ From the device-13 4-frame scan capture, the phases are:
    **bulk image reads on `0x86` in 20480-byte chunks**. In the 4-frame capture:
    ~11719 image reads (~240 MB raw) with ~2070 EP1 commands interleaved.
 
+### Scan start/stop — CONFIRMED from `scan.pakscan` + `scan_fullroll.pakscan`
+
+Two independent engines, each with a symmetric start/stop command of the form
+`04 03 <addr> 00 <param>`. Both captures agree byte-for-byte:
+
+| Engine | Addr | START | STOP |
+|---|---|---|---|
+| **CCD readout** (light + sensor → `0x86`) | PICL `0x20` | `04 03 20 00 8a` | `04 03 20 00 92` |
+| **Film transport motor** | PICM `0x24` | `04 03 24 00 a0` | `04 03 24 00 a2` |
+
+- The CCD arm `04 03 20 00 8a` is the only repeated kick (22× / 18×): it's *both*
+  the start and the keep-feeding primitive, re-issued as the FX2 buffer drains,
+  always paired with a host-side arm write `02 04 10 01 84 02` just before it,
+  then a PICL poll `03 01 20`. Each arm is followed by a burst of `0x86` reads.
+- `04 03 20 00 92` (stop readout) appears **exactly once**, right after the last
+  image read; `04 03 24 00 a2` (stop motor) immediately after it. That two-command
+  tail is the scan stop, identical in both captures.
+- Ordering: **readout starts first** (`8a`) and grabs calibration/preview lines
+  with the film stationary; **then the motor starts** (`a0`) to pull the roll
+  through (in `scan.pakscan` ~1325 preview reads precede `a0`, ~10394 follow).
+  `a0` is therefore the clean split marker between deterministic setup and the
+  open-ended image-transfer loop.
+
+### Poll-driven scan state machine — `pakon_replay --scan-sm` (untested on hw)
+
+Verbatim `--scan` is locked to the captured image-read count, so it only fits a
+roll the same length as the reference. `--scan-sm` instead replays the
+deterministic setup spine (OPEN → param table → calibration register writes →
+motor start `a0`, none of which we can synthesise) up to the first image read
+after `a0`, then **drives the transfer itself**: read `0x86`; on an empty read,
+poll HOST/PICL/PICM (statuses logged — this also discovers the real protocol
+done-signal) and re-issue the arm pair `02 04 10 01 84 02` + `04 03 20 00 8a`;
+finally send the stop tail `92` + `a2`.
+
+**Done-signal = end-of-roll white.** We can't mine the protocol done-signal
+offline (the `.pakscan` stores commands sent, never poll replies). Instead we use
+the image data: the scan ends with the open gate shining through no film
+(samples ≈ 48900, near 16-bit max; film/base/leader is far darker). The loop
+latches `film_seen` on the first non-white chunk, then stops after a sustained
+run of trailing white. Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT`
+90, `SM_TRAIL_WHITE` 8 chunks, `SM_MAX_EMPTY` 8 (safety), plus `--max-mb` cap.
+
 ### Command verbs (EP1, from frequencies)
 
 - `04 03 <addr> 00 <p>` — query/command to an address (open, PIC probe, kick).
@@ -196,6 +238,17 @@ Captured `0x86` stream = **239,984,640 bytes**, 20480-byte chunks, ~240 MB /
   frames, then a blank tail; plus a uniform **gate margin** on one side (cols
   ~2050+) and an orange-base sliver at col 0. `pakon_image.py --autocrop`
   isolates the film.
+- **Idea (not built): capture-time leading-white trim.** Because film is
+  inserted by hand, the scan can stream seconds of open-gate white (≈48900)
+  before the strip loads, all written to the `.raw`. We could drop it in
+  `pakon_replay --scan` with a latched `--skip-leader`: drop "no-film" lines
+  (≥90% of samples > ~40000) until the first non-white line, then write
+  everything verbatim. **Hard constraint:** trimming must be done in whole
+  **16000-byte line units**, never per `0x86` read — a read is 20480 B (1.28
+  lines), so dropping a raw chunk desyncs the line stride and shears the rest of
+  the image. Leading-only + latched so it never punches holes mid-image. Low
+  priority: `--autocrop` already removes this region in post; the only wins are
+  disk and a bounded file regardless of insert delay.
 
 **Resolved photometric/alignment questions (2026-05-31), see STATUS.md:**
 - **Q1 ghosting — trilinear CCD.** The per-line "restart" is correct (no phase
