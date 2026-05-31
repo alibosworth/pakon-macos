@@ -229,14 +229,22 @@ the command channel by writing into a live stream — removed.)
 exists, and the `.pakscan` has no replies). The scan ends with the open gate
 shining through no film (samples ≈ 48900, near 16-bit max; film/base/leader is
 far darker). The loop latches `film_seen` on the first non-white chunk, then
-stops after a sustained run of trailing white. Tunables: `SM_WHITE_THRESH`
-40000, `SM_WHITE_FRAC_PCT` 90, `SM_TRAIL_WHITE` 8; backstop `SM_MAX_EMPTY` 2
-(empty ~5s read windows with no data → stop) plus `--max-mb`. **Important:** at
-end-of-roll HOST reports `0x80` *busy* with nothing more coming, so the loop must
-NOT keep waiting on busy — an empty read *window* (the blocking read already
-absorbs transient busy) means the film is through; waiting on `0x80` instead runs
-the motor until the film ejects. If no film is ever detected (stale device /
-nothing loaded) it warns rather than re-arming into a dead stream.
+stops after a sustained run of trailing white.
+
+**Empty reads mean opposite things before vs after film, and look identical on
+the wire (HOST `0x80` busy, read times out):** the CCD streams *nothing* while
+the gate is empty — it only starts once film reaches it. So the loop gates on
+`film_seen`:
+- **before film** — the operator is still feeding the film (it can take ~10 s);
+  wait up to `SM_LOAD_WAIT` windows (~2 min) before aborting "no film fed".
+- **after film** — the film has passed the gate → end of roll; stop after
+  `SM_MAX_EMPTY` (2) empty windows. Must NOT keep waiting on `0x80` busy here or
+  the motor runs until the film ejects.
+
+Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT` 90, `SM_TRAIL_WHITE` 8,
+`SM_MAX_EMPTY` 2, `SM_LOAD_WAIT` 24, plus `--max-mb`. End-of-roll white is the
+primary/faster stop (fires on trailing white *data*, before the film ejects);
+the empty-window backstop covers the case where the device just stops feeding.
 
 ### Command verbs (EP1, from frequencies)
 

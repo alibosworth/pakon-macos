@@ -428,7 +428,9 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
 #define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
 #define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
 #define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
-#define SM_MAX_EMPTY      2u      /* empty read windows (~5s each) w/o data => done */
+#define SM_MAX_EMPTY      2u      /* empty windows (~5s each) AFTER film => end of roll */
+#define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
+                                   * operator to feed the film (~5s each, ~2 min) */
 
 static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
 
@@ -481,9 +483,11 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
     pakon_packet reply;
 
-    printf("  [sm] image phase: read 0x86 (no re-arm; CCD armed in setup); stop "
-           "on %u trailing-white chunks, %u ready-empty reads, or %lu MB cap\n",
-           SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
+    printf("  [sm] image phase: feed the film now. Waiting up to ~%u s for it, "
+           "then reading 0x86 (no re-arm); stop on %u trailing-white chunks, "
+           "%u empty windows after film, or %lu MB cap\n",
+           SM_LOAD_WAIT * (SCAN_IMG_TIMEOUT_MS / 1000), SM_TRAIL_WHITE,
+           SM_MAX_EMPTY, max_mb);
 
     for (;;) {
         size_t got = 0;
@@ -515,22 +519,35 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
 
         /* A full read window (SCAN_IMG_TIMEOUT_MS) elapsed with zero bytes. The
-         * blocking bulk read already absorbs transient 0x80 busy (the device
-         * NAKs and libusb waits within the window), so an empty window means the
-         * device is no longer feeding -- i.e. the film is through. CRITICAL: at
-         * end-of-roll HOST reports 0x80 *busy* with nothing more coming, so we
-         * must NOT keep waiting on busy (that runs the motor until the film
-         * ejects). Poll HOST once for the log only, then count the empty window
-         * and stop promptly. */
+         * blocking bulk read already absorbs transient 0x80 busy (device NAKs,
+         * libusb waits within the window), so an empty window means no data.
+         * What that MEANS depends on whether film has been seen yet -- the two
+         * look identical on the wire (HOST 0x80 busy, empty reads):
+         *   - before film: the operator is still feeding the film (the gate is
+         *     empty and the CCD streams nothing until film arrives). Wait.
+         *   - after film: the film has passed the gate -> end of roll. Stop
+         *     promptly; do NOT keep waiting on busy or the motor ejects the film.
+         */
         uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
             st = pakon_packet_status(&reply);
         else (*errs)++;
         (*ncmd)++;
-        printf("  [sm] empty read, HOST st=0x%02x (idle %u/%u)\n",
-               st, idle + 1, SM_MAX_EMPTY);
-        if (++idle >= SM_MAX_EMPTY) {
-            printf("  [sm] stream ended (no data for %u windows) -> stopping\n", idle);
+        idle++;
+        if (!film_seen) {
+            if (idle >= SM_LOAD_WAIT) {
+                fprintf(stderr, "  [sm] no film fed within ~%u s -> aborting\n",
+                        idle * (SCAN_IMG_TIMEOUT_MS / 1000));
+                break;
+            }
+            printf("  [sm] waiting for film... (%u/%u, HOST st=0x%02x)\n",
+                   idle, SM_LOAD_WAIT, st);
+            continue;
+        }
+        printf("  [sm] empty read after film, HOST st=0x%02x (idle %u/%u)\n",
+               st, idle, SM_MAX_EMPTY);
+        if (idle >= SM_MAX_EMPTY) {
+            printf("  [sm] stream ended (no data for %u windows) -> end of roll\n", idle);
             break;
         }
     }
