@@ -144,9 +144,37 @@ After the EP1 probe, the driver reads a structured block via EP0 vendor control:
 0x28, 0x48, …). Looks like a calibration/parameter table. 16 such pairs in the
 capture. To be decoded in Phase 5.
 
-## Scan path — partially mapped (Phase 5)
+## Scan path — mapped from capture (Phase 5)
 
-Open + PIC-probe + parameter read are now known (above). Still to decode from
-the capture: the configure/scan-start commands on EP1, and the **image-stream
-format** on `0x86` (geometry, bit depth, frame boundaries). Model as a state
-machine: `OPEN → CONFIGURE → CALIBRATE → SCAN_FRAMES → READ_IMAGE → DONE`.
+From the device-13 4-frame scan capture, the phases are:
+
+1. **OPEN** — handshake + PIC presence probes (above). *Replayed & verified.*
+2. **PARAM READ** — 16 `0xA4`(OUT trigger, wValue=0x00A5)/`0xA9`(IN) control
+   pairs reading a table in 32-byte chunks at offsets 0x00, 0x08, 0x28 … 0x808.
+   Likely device capabilities/calibration constants.
+3. **CONFIGURE** — register writes on the command channel, each followed by a
+   `03 01 <addr>` status poll:
+   - PICM (`0x24`): `02 06 24 03 82 <reg> <vN> <vM>` for sub-registers 0x00–0x0a
+     and `0x84` (scan geometry/exposure parameters), then `04 03 24 00 a2`.
+   - PICL (`0x20`): `02 07 20 04 8x …` and `02 06 20 03 91 …` (more params),
+     `02 04 20 01 80 01` / `80 00` (enable/strobe-style toggles).
+4. **SCAN / STREAM** — kicked around `04 03 20 00 8a`; then a tight interleaved
+   loop: status polls (`03 01 10`/`20`/`24`), register reads (`01 03 20 …`), and
+   **bulk image reads on `0x86` in 20480-byte chunks**. In the 4-frame capture:
+   ~11719 image reads (~240 MB raw) with ~2070 EP1 commands interleaved.
+
+### Command verbs (EP1, from frequencies)
+
+- `04 03 <addr> 00 <p>` — query/command to an address (open, PIC probe, kick).
+- `03 01 <addr>` — **status poll** of an address (10=HOST, 20=PICL, 24=PICM);
+  the driver repeats these waiting for ready (e.g. 36×, 5× runs).
+- `01 03 <addr> <reg> <p>` — read a register.
+- `02 <n> <addr> <len> <reg> <data…>` — write register(s).
+
+### Image format — UNKNOWN (need geometry/bit-depth)
+
+Chunk size is 20480 bytes; total ~240 MB / 4 frames ⇒ ~60 MB/frame (raw,
+uncompressed; likely full-res multi-channel). Exact geometry/bit-depth/frame
+boundaries TBD — best obtained by driving a scan ourselves and reading `0x86`
+(or an in-VM USBPcap capture). Note: film is **motor-fed whole rolls** — design
+CANCEL to let the feed finish, not hard-abort.

@@ -84,18 +84,28 @@ sudo ./build/pakon_replay --open    # reaches Idle
 
 ## NEXT: Phase 5 (reproduce a scan, read the image)
 
-We can now drive the device live, so we don't need the image bytes from the
-capture — once we replay the scan command sequence, we read `0x86` ourselves.
-Plan:
-1. Extract the full EP1 command sequence (2218 exchanges) + `0xA4`/`0xA9` reads
-   from the capture into an ordered "scan script" (like the firmware extractor).
-   Watch for the `03 01 10` status-poll loops (1605×) — replay must wait on
-   them, not blast commands.
-2. Add `pakon_replay --scan`: drive that sequence against hardware (film loaded),
-   reading `0x86` bulk image data into a file (PNM/raw) to eyeball.
-3. Decode the image-stream format (geometry, bit depth, frame boundaries) from
-   what WE read off `0x86`. (In-VM USBPcap remains a cross-check option.)
-Caution (from plan): film is motor-fed whole rolls; design CANCEL carefully.
+Scan flow is now mapped (see docs/PROTOCOL.md): OPEN → PARAM READ (0xA4/0xA9) →
+CONFIGURE (PICL/PICM register writes + polls) → SCAN (interleaved status polls +
+`0x86` 20480-byte image reads; ~240 MB / 4 frames). Crucially, **commands are
+interleaved with image reads** (2070 EP1 cmds during streaming), so it's an
+ordered operation loop, not "start then drain".
+
+Recommended implementation — **operation replay**:
+1. Add `analyze_capture.py --extract-scan OUT.pakscan`: emit the full ordered
+   device-13 operation list — EP1 OUT (bytes), EP1 IN (read+expect), `0x86`
+   IN (read N), `0xA4`/`0xA9` control — like the firmware extractor but for the
+   whole session.
+2. Add `pakon_replay --scan FILE`: replay each operation in order against the
+   device, writing `0x86` payloads to a raw image file. (We can now drive the
+   device, so we get the real image bytes even though the capture lacked them.)
+3. Decode geometry/bit-depth/frame boundaries from the bytes we read.
+
+Caution: film is motor-fed whole rolls → **load film before --scan**, and
+design CANCEL to let the feed finish (don't hard-abort mid-roll). This step is
+big and hardware-risky; give it a dedicated pass.
+
+Alternatively: build the proper state machine (poll-until-ready instead of
+verbatim poll counts) rather than pure replay — more robust, more work.
 
 ## Handy commands
 
