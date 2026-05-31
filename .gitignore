@@ -7,5 +7,6 @@
 .DS_Store
 *.swp
 
-# local Claude Code state
-.claude/
+# local Claude Code state, but track shared project skills
+.claude/*
+!.claude/skills/
