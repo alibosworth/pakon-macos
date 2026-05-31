@@ -428,9 +428,7 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
 #define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
 #define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
 #define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
-#define SM_MAX_EMPTY      3u      /* consecutive ready(0x00)-but-empty reads => done */
-#define SM_MAX_BUSY       600u    /* consecutive busy(0x80) polls w/o data => give up */
-#define SM_HOST_BUSY      0x80u   /* HOST status: busy/buffer-starved (else 0x00) */
+#define SM_MAX_EMPTY      2u      /* empty read windows (~5s each) w/o data => done */
 
 static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
 
@@ -479,7 +477,7 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
 
     uint8_t buf[20480];
     int film_seen = 0;
-    unsigned trail_white = 0, idle = 0, busy = 0;
+    unsigned trail_white = 0, idle = 0;
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
     pakon_packet reply;
 
@@ -495,7 +493,7 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             fwrite(buf, 1, got, img);
             *img_bytes += got;
             (*nimg)++;
-            idle = busy = 0;
+            idle = 0;
             if (sm_chunk_is_white(buf, got)) {
                 if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
                     printf("  [sm] end-of-roll white (%u chunks) after %llu bytes "
@@ -516,25 +514,23 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         }
         if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
 
-        /* No data this window: ask HOST whether it's still working. Read-only,
-         * so this can never wedge the command channel mid-stream. */
+        /* A full read window (SCAN_IMG_TIMEOUT_MS) elapsed with zero bytes. The
+         * blocking bulk read already absorbs transient 0x80 busy (the device
+         * NAKs and libusb waits within the window), so an empty window means the
+         * device is no longer feeding -- i.e. the film is through. CRITICAL: at
+         * end-of-roll HOST reports 0x80 *busy* with nothing more coming, so we
+         * must NOT keep waiting on busy (that runs the motor until the film
+         * ejects). Poll HOST once for the log only, then count the empty window
+         * and stop promptly. */
         uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
             st = pakon_packet_status(&reply);
         else (*errs)++;
         (*ncmd)++;
-
-        if (st == SM_HOST_BUSY) {                 /* still feeding -- wait more */
-            if (++busy >= SM_MAX_BUSY) {
-                printf("  [sm] HOST busy for %u polls with no data -> giving up\n", busy);
-                break;
-            }
-            continue;
-        }
         printf("  [sm] empty read, HOST st=0x%02x (idle %u/%u)\n",
                st, idle + 1, SM_MAX_EMPTY);
-        if (++idle >= SM_MAX_EMPTY) {             /* ready but nothing left */
-            printf("  [sm] no more image data -> done\n");
+        if (++idle >= SM_MAX_EMPTY) {
+            printf("  [sm] stream ended (no data for %u windows) -> stopping\n", idle);
             break;
         }
     }
