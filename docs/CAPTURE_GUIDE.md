@@ -14,6 +14,13 @@ with usbmon** — nothing extra needs installing inside Windows.
 - In the VM, confirm the driver actually scans (Kaufman's FX35 driver +
   TLXClientDemo, or the original Pakon/TLX software). We need a *successful*
   scan to capture.
+- **VirtualBox USB filter caveat (two firmware stages):** the device boots as
+  bootstrap `0f05:f235`, and the driver downloads stage-2 firmware so it
+  re-enumerates as operational `0f05:f135`. A USB filter matching only `f235`
+  will *release the device back to the host* the moment it becomes `f135`, so
+  the VM can do the firmware load but cannot run a full scan. Make the filter
+  **vendor-only** (`Vendor ID = 0f05`, Product ID blank) — or add a second
+  filter for `0f05:f135` — so the VM retains the device across re-enumeration.
 - On the host: `sudo apt install wireshark tshark` (or distro equivalent).
   `dumpcap`/`tshark` come with Wireshark. Add yourself to the `wireshark` group
   or just run capture with `sudo`.
