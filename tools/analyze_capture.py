@@ -393,6 +393,27 @@ def extract_scan(recs, path, scan_device=None):
           f"{n_m} image reads, {n_c} control reads")
 
 
+def extract_commands(recs, path, device=None):
+    """Write the operational device's EP1 command sequence to a .pakscan script
+    (O lines only — no image stream needed). Use for advance/utility captures."""
+    if device is None:
+        cnt = Counter(r.dev for r in recs if r.ep == 0x01 and r.urb == "S" and r.data)
+        if not cnt:
+            sys.exit("no EP1 OUT commands found")
+        device = cnt.most_common(1)[0][0]
+    n = 0
+    with open(path, "w") as fh:
+        fh.write("# pakon command script (from capture)\n")
+        fh.write(f"# device {device}\n")
+        fh.write("# O <hex> = EP1 cmd out (+read reply on 0x81)\n")
+        for r in recs:
+            if r.dev != device or r.urb != "S" or r.ep != 0x01 or not r.data:
+                continue
+            fh.write("O " + bytes(r.data).hex() + "\n")
+            n += 1
+    print(f"wrote {path}: device {device} — {n} commands")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture")
@@ -419,6 +440,9 @@ def main():
     ap.add_argument("--scan-device", type=int,
                     help="device number of the operational (f135) device for "
                          "--extract-scan (auto-detected if omitted)")
+    ap.add_argument("--extract-commands", metavar="OUT.pakscan",
+                    help="extract EP1 command sequence only (no image stream "
+                         "required; use for advance/utility captures)")
     args = ap.parse_args()
 
     fmt = args.format
@@ -444,6 +468,9 @@ def main():
         return
     if args.extract_scan:
         extract_scan(recs, args.extract_scan, args.scan_device)
+        return
+    if args.extract_commands:
+        extract_commands(recs, args.extract_commands)
         return
 
     # Inventory of (bus, device) before filtering — helps pick --device, since

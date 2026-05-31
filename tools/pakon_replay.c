@@ -133,7 +133,37 @@ static int hexbytes(const char *s, uint8_t *out, size_t max)
     return hi < 0 ? (int)n : -1;
 }
 
-static int do_scan(const char *script, const char *image_path, unsigned timeout)
+/* After the script ends, keep polling + draining 0x86 until it goes quiet.
+ * Used for scans longer than the captured reference (e.g. whole rolls). */
+static void drain_image(pakon_dev *dev, FILE *img,
+                        unsigned long *ncmd, unsigned long *nimg,
+                        unsigned long long *img_bytes, unsigned long *errs,
+                        unsigned timeout)
+{
+    /* 03 01 10 = status poll HOST — the tight loop command from the capture */
+    uint8_t poll_data[] = {0x10};
+    pakon_packet poll_pkt, poll_reply;
+    pakon_packet_build(&poll_pkt, 0x03, poll_data, 1);
+
+    uint8_t buf[20480];
+    for (;;) {
+        pakon_result r = pakon_cmd(dev, &poll_pkt, &poll_reply, timeout);
+        if (r != PAKON_OK) (*errs)++;
+        (*ncmd)++;
+
+        size_t got = 0;
+        r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, buf, sizeof(buf), &got,
+                           SCAN_IMG_TIMEOUT_MS);
+        if (got) { fwrite(buf, 1, got, img); *img_bytes += got; }
+        if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
+        if (++(*nimg) % 1000 == 0)
+            printf("  ... %lu image reads, %llu bytes\n", *nimg, *img_bytes);
+        if (got == 0 || r == PAKON_ERR_TIMEOUT) break;
+    }
+}
+
+static int do_scan(const char *script, const char *image_path, unsigned timeout,
+                   int drain)
 {
     FILE *fp = fopen(script, "r");
     if (!fp) { fprintf(stderr, "cannot open scan script '%s'\n", script); return 1; }
@@ -204,6 +234,11 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout)
         }
     }
 
+    if (!rc && drain) {
+        printf("  [drain] script exhausted, draining 0x86 until scanner signals done...\n");
+        drain_image(dev, img, &ncmd, &nimg, &img_bytes, &errs, timeout);
+    }
+
     pakon_usb_release(dev);
     pakon_usb_close(dev);
     pakon_usb_exit(ctx);
@@ -218,10 +253,12 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout)
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s [--open] [--scan FILE] [--image OUT] [--timeout MS] [--help]\n"
+        "usage: %s [--open] [--scan FILE] [--image OUT] [--drain] [--timeout MS] [--help]\n"
         "  --open        replay the captured open handshake, verify replies\n"
         "  --scan FILE   replay a .pakscan operation script (drives a scan!)\n"
         "  --image OUT   raw image output for --scan (default pakon_scan.raw)\n"
+        "  --drain       after the script ends, keep reading 0x86 until the scanner\n"
+        "                signals end-of-roll (use for whole-roll scans)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
         argv0);
@@ -229,7 +266,7 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    int want_open = 0;
+    int want_open = 0, drain = 0;
     const char *scan_file = NULL;
     const char *image_path = "pakon_scan.raw";
     unsigned timeout = 1000;
@@ -244,6 +281,8 @@ int main(int argc, char **argv)
             scan_file = argv[++i];
         } else if (!strcmp(argv[i], "--image") && i + 1 < argc) {
             image_path = argv[++i];
+        } else if (!strcmp(argv[i], "--drain")) {
+            drain = 1;
         } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
             timeout = (unsigned)strtoul(argv[++i], NULL, 0);
         } else {
@@ -259,6 +298,6 @@ int main(int argc, char **argv)
     }
 
     if (scan_file)
-        return do_scan(scan_file, image_path, timeout);
+        return do_scan(scan_file, image_path, timeout, drain);
     return do_open(timeout);
 }

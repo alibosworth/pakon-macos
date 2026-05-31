@@ -11,9 +11,6 @@
 .claude/*
 !.claude/skills/
 
-# extracted firmware (Kodak bytes — regenerate from a capture)
-*.pakfw
-
 # decoded scan output (large; regenerate with pakon_image.py)
 frame_*.tif
 frame_*.png
