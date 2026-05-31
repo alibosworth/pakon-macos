@@ -9,6 +9,10 @@ protocol notes and our own USB captures.
 > firmware load, open handshake, scan drive, and image decode are all
 > validated on Linux and macOS. Phase 6 is a native Swift macOS app (IOKit
 > transport, SwiftUI, no SANE dependency). SANE backend for Linux follows.
+>
+> The decoder handles both the 4-frame and whole-roll scan modes, including
+> Digital ICE IR channel removal, wrap-order de-interleaving, and per-zone
+> trilinear registration.
 
 ## Architecture
 
@@ -113,27 +117,44 @@ Load film into the scanner, then:
 ./build/pakon_replay --scan scan.pakscan --image scan.raw
 ```
 
-Streams ~240 MB of raw image data per 4-frame strip. Watch for the progress
-output; a couple of transfer errors at the very end are normal.
+Streams ~240 MB per 4-frame strip, or ~1.2 GB for a whole roll. A couple of
+transfer errors at the very end are normal.
 
 **5. Decode the image**
 
 Requires Python 3, `numpy`, and ImageMagick (`magick`).
 
 ```sh
-python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4
+# 4-frame strip
+python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4 --resample-to 3000x2000
+
+# Whole roll (24 frames)
+python3 tools/pakon_image.py fullroll.raw --rotate 90 --frames 24 --resample-to 3000x2000
 ```
 
-Writes `frame_1.tif` … `frame_4.tif` as 16-bit RGB TIFFs — registered,
+Writes `frame_1.tif` … `frame_N.tif` as 16-bit RGB TIFFs — registered,
 autocropped raw negatives, orange mask intact. Feed them to Negative Lab Pro,
 darktable negadoctor, or similar for proper C-41 inversion.
+
+The decoder automatically handles:
+- **Digital ICE IR channel** — a ~658 px neutral-grayscale band embedded in
+  each scan line for dust/scratch detection; detected and removed automatically
+- **Wrap-order de-interleaving** — in whole-roll mode the IR band lands in the
+  middle of the line, wrapping the visible image; the decoder rejoins the halves
+  at the correct sensor seam
+- **Per-zone trilinear registration** — the two wrapped halves come from
+  opposite CCD tap ends with different R/G/B line offsets and are registered
+  independently (eliminates colour ghosting at edges)
+- **Aspect ratio correction** — raw pixels are non-square; `--resample-to
+  3000x2000` outputs correct 3:2 geometry matching Pakon's native resolution
 
 Key decoder options:
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--frames N` | 1 | split the ribbon into N frames |
+| `--frames N` | 1 | split the ribbon into N frames (uses gap detection) |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
+| `--resample-to WxH` | off | resample to exact size (use `3000x2000` for 35mm) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
 | `--autocrop` / `--no-autocrop` | on | strip leader, blank pre-load scan, and gate margin |
 | `--invert` | off | quick linear positive (preview only — not real C-41) |
