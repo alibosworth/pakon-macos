@@ -9,6 +9,12 @@ The captured 0x86 image stream (pakon_replay --scan output) is, on this F-135:
   - `--linewidth` samples per scan line (default 8000 = 16000-byte stride),
     giving width = linewidth//3 px (~2666); the last 0-2 samples are padding.
 
+The sensor is **trilinear** (separate R/G/B lines spaced along the scan
+direction), so the three channels are offset by a few scan lines and show
+colour ghosting at edges if naively combined. By default it **co-registers**
+them (auto-measured lead per channel, ~G+16/B+8 lines on this F-135);
+`--no-register` disables it, `--reg-leads G,B` forces the offsets.
+
 By default it **autocrops** the ribbon: a real scan begins with a dark leader
 and often a blank stretch (light through no film, before the strip is loaded),
 ends with another blank tail, and carries a uniform gate margin on one side.
@@ -30,6 +36,40 @@ import sys
 import tempfile
 
 import numpy as np
+
+
+def _vlead(ch, ref, rng=40, rowstep=1, colstep=3):
+    """Vertical 'lead' of channel `ch` over `ref` in scan lines: the dy that
+    maximizes corr(ch[row], ref[row+dy]). On this F-135 the sensor is trilinear
+    (separate R/G/B lines along the scan), so a feature at ref row y appears in
+    `ch` at row y-dy. Measured on a central detail band, subsampled for speed."""
+    n = ch.shape[0]
+    a, b = int(n * 0.35), int(n * 0.65)
+    A = ch[a:b:rowstep, ::colstep].astype(np.float32)
+    Rf = ref[a:b:rowstep, ::colstep].astype(np.float32)
+    rng = min(rng, A.shape[0] // 4)
+    base = A[rng:-rng]
+    best = (0, -2.0)
+    for dy in range(-rng, rng + 1):
+        cmp = Rf[rng + dy:Rf.shape[0] - rng + dy]
+        x = base.ravel() - base.mean()
+        y = cmp.ravel() - cmp.mean()
+        d = np.linalg.norm(x) * np.linalg.norm(y)
+        if d:
+            c = float(np.dot(x, y) / d)
+            if c > best[1]:
+                best = (dy, c)
+    return best[0]
+
+
+def register_channels(chans, leads):
+    """Co-register trilinear R/G/B planes given each channel's lead (in lines)
+    relative to R. Output row y takes chans[c][y - lead_c]; all planes are
+    cropped to the common valid span. Returns (aligned dict, new line count)."""
+    m = max(leads.values())
+    L = next(iter(chans.values())).shape[0] - m
+    out = {c: chans[c][m - leads[c]: m - leads[c] + L] for c in chans}
+    return out, L
 
 
 def write_tiff(rgb16, path):
@@ -114,6 +154,13 @@ def main():
                     default=True,
                     help="auto-trim leader/blank-scan/right-margin (default on; "
                          "--no-autocrop keeps the full raw ribbon)")
+    ap.add_argument("--register", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="co-register the trilinear R/G/B sensor lines (default "
+                         "on; fixes colour ghosting at edges)")
+    ap.add_argument("--reg-leads",
+                    help="force channel leads in lines as 'G,B' (rel. to R), "
+                         "e.g. 16,8; default = auto-measure")
     ap.add_argument("--invert", action="store_true",
                     help="quick linear positive (preview only; not real C-41)")
     ap.add_argument("-o", "--out", default="frame",
@@ -127,6 +174,18 @@ def main():
 
     n3 = (lw // 3) * 3
     chans = {"r": img[:, 0:n3:3], "g": img[:, 1:n3:3], "b": img[:, 2:n3:3]}
+
+    if args.register:
+        if args.reg_leads:
+            g, b = (int(v) for v in args.reg_leads.split(","))
+            leads = {"r": 0, "g": g, "b": b}
+        else:
+            leads = {"r": 0,
+                     "g": _vlead(chans["g"], chans["r"]),
+                     "b": _vlead(chans["b"], chans["r"])}
+        chans, _ = register_channels(chans, leads)
+        print(f"register: trilinear leads (lines) R=0 G={leads['g']} B={leads['b']}")
+
     rgb = np.stack([chans[c] for c in args.order.lower()], axis=-1)  # (lines,W,3)
 
     if args.autocrop:
