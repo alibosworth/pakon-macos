@@ -98,15 +98,22 @@ propagates to test binaries with correct search dirs.
 
 ## Status & next step
 
-- Phase 0 (scaffold) and Phase 1 transport are done **except** what cold/
-  firmware needed — which the auto-warm hardware makes unnecessary. Real USB
-  enumeration, warm-family matching, device listing, warm open, and full
-  endpoint enumeration (all interfaces/altsettings) are implemented; Intel HEX
-  parser is implemented + unit-tested; FX2 download is implemented but gated.
-- **Next:** get the warm endpoint map off the hardware, classify command (OUT)
-  vs image (bulk IN) endpoints, then **Phase 2** (`pakon_usb_send/recv` with
-  exact sizing, timeouts, alt-setting selection, interface claim; macOS class-
-  driver detach notes), then **Phase 3** (framing + checksum + open handshake).
+- Phases 0–1 done (cold/firmware path is moot per the auto-warm hardware).
+- **Endpoint map is known** (warm `0f05:f235`, interface 0, 4 alt settings;
+  see docs/PROTOCOL.md). Physical FX2 endpoints EP1/EP2/EP4/EP6/EP8. Hypothesis
+  (unconfirmed): EP1 0x01/0x81 = command/status, EP2/EP4 OUT = host→device bulk,
+  EP6/EP8 IN = image stream. The driver's chosen alt setting is unknown.
+- **Phase 2 transport implemented:** `pakon_usb_claim(dev, ifc, alt)` /
+  `pakon_usb_release`, and `pakon_usb_send/recv(dev, ep, ...)` which dispatch
+  bulk vs interrupt based on the endpoint's type in the current alt, with
+  timeouts, stall (PIPE) recovery via clear_halt, and trace hexdumps. The
+  command endpoint is intentionally NOT hardcoded.
+  - `pakon_probe --raw HEX --out 0xNN [--in 0xNN] [--alt N] [--timeout MS]`
+    lets us probe endpoints empirically.
+- **Next:** find the command channel/alt by sending the documented open packet
+  (`04 03 10 00 85`, likely padded to the 36-byte frame) on candidate EP pairs
+  and watching for the `07 02 10 00` reply — that bridges into **Phase 3**
+  (framing + checksum derivation + open handshake in `pakon_replay --open`).
 
 ## Dev / sync workflow
 

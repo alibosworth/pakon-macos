@@ -73,10 +73,32 @@ host -> 02 04 10 01 8f 00     ; (next exchange)
 ...                           ; drive to Idle
 ```
 
-## Endpoints — **TBD (Phase 2)**
+## Endpoints — observed (warm `0F05:F235`, an F-135 unit)
 
-The 3 warm endpoints must be classified into command channel vs image/bulk-IN.
-Initial guess from descriptor directions; confirmed empirically in Phase 2.
+Interface 0 with **4 alternate settings** (alt 0 is the empty FX2 default).
+Physical endpoints are the standard Cypress FX2 set: EP1, EP2, EP4, EP6, EP8.
+Full map (from `pakon_probe`):
+
+| Alt | Endpoints |
+|----:|-----------|
+| 0   | (none — default empty alt setting) |
+| 1   | 0x01 OUT bulk/512, 0x81 IN bulk/512, 0x02 OUT bulk/512, 0x04 OUT bulk/512, 0x86 IN bulk/512, 0x88 IN bulk/512 |
+| 2   | 0x01 OUT int/64, 0x81 IN int/64, 0x02 OUT int/512, 0x04 OUT bulk/512, 0x86 IN int/512, 0x88 IN bulk/512 |
+| 3   | 0x01 OUT int/64, 0x81 IN int/64, 0x02 OUT iso/512, 0x04 OUT bulk/512 |
+
+Note: this contradicts the older "3 endpoints" note — that was approximate.
+
+### Working hypothesis (NOT yet confirmed — confirm in Phase 2/3)
+
+- **EP1 `0x01`/`0x81`** = command/status channel. It is 64-byte in alts 2/3,
+  comfortably holding the documented 36-byte frame, and matches the Windows
+  36-byte IOCTL packet exchange.
+- **EP2/EP4 OUT** = host→device bulk (commands / scan setup / bulk out).
+- **EP6/EP8 IN** = device→host, i.e. the **image stream** (high-volume bulk).
+- **Which alt setting the driver selects is unknown.** alt 1 (all bulk) is the
+  simplest candidate; alts 2/3 add interrupt/iso variants. The open-handshake
+  reply (`04 03 10 00 85` → `07 02 10 00`) on a candidate EP pair will tell us
+  the real command channel + alt. Use `pakon_probe --alt/--out/--in/--raw`.
 
 ## Scan path — **UNKNOWN (Phase 4-5)**
 

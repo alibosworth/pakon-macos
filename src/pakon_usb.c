@@ -38,7 +38,9 @@ struct pakon_dev {
     uint16_t pid;
     pakon_endpoint endpoints[MAX_ENDPOINTS];
     size_t n_endpoints;
-    /* claimed interface, etc. filled in Phase 2 */
+    int     claimed;        /* nonzero once an interface is claimed */
+    uint8_t cur_ifc;        /* currently claimed interface */
+    uint8_t cur_alt;        /* currently selected alternate setting */
 };
 
 pakon_result pakon_usb_init(pakon_ctx **out_ctx)
@@ -275,6 +277,8 @@ void pakon_usb_close(pakon_dev *dev)
 {
     if (!dev)
         return;
+    if (dev->claimed && dev->handle)
+        libusb_release_interface(dev->handle, dev->cur_ifc);
     if (dev->handle)
         libusb_close(dev->handle);
     free(dev);
@@ -412,18 +416,132 @@ pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *hex_path)
     return PAKON_OK;
 }
 
-pakon_result pakon_usb_send(pakon_dev *dev, const uint8_t *buf, size_t len,
-                            unsigned timeout_ms)
+pakon_result pakon_usb_claim(pakon_dev *dev, uint8_t ifc, uint8_t alt)
 {
-    (void)dev; (void)buf; (void)len; (void)timeout_ms;
-    return PAKON_ERR_UNIMPLEMENTED;   /* Phase 2 */
+    if (!dev || !dev->handle)
+        return PAKON_ERR_PARAM;
+
+    /* Linux: let libusb detach any kernel driver holding the interface. */
+    (void)libusb_set_auto_detach_kernel_driver(dev->handle, 1);
+
+    int rc = libusb_claim_interface(dev->handle, ifc);
+    if (rc != 0) {
+        pakon_logf(PAKON_LOG_ERROR, "claim interface %u: %s", ifc,
+                   libusb_strerror((enum libusb_error)rc));
+        return PAKON_ERR_USB;
+    }
+
+    rc = libusb_set_interface_alt_setting(dev->handle, ifc, alt);
+    if (rc != 0) {
+        pakon_logf(PAKON_LOG_ERROR, "set interface %u alt %u: %s", ifc, alt,
+                   libusb_strerror((enum libusb_error)rc));
+        libusb_release_interface(dev->handle, ifc);
+        return PAKON_ERR_USB;
+    }
+
+    dev->claimed = 1;
+    dev->cur_ifc = ifc;
+    dev->cur_alt = alt;
+    pakon_logf(PAKON_LOG_INFO, "claimed interface %u, alt setting %u", ifc, alt);
+    return PAKON_OK;
 }
 
-pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t *buf, size_t len,
+pakon_result pakon_usb_release(pakon_dev *dev)
+{
+    if (!dev || !dev->handle)
+        return PAKON_ERR_PARAM;
+    if (!dev->claimed)
+        return PAKON_OK;
+    libusb_release_interface(dev->handle, dev->cur_ifc);
+    dev->claimed = 0;
+    return PAKON_OK;
+}
+
+/* Look up the transfer type (LIBUSB_TRANSFER_TYPE_*) of endpoint `ep` in the
+ * currently-selected alt setting. Returns -1 if not found in this alt. */
+static int endpoint_type(const pakon_dev *dev, uint8_t ep)
+{
+    for (size_t i = 0; i < dev->n_endpoints; i++) {
+        if (dev->endpoints[i].altsetting == dev->cur_alt &&
+            dev->endpoints[i].address == ep)
+            return dev->endpoints[i].attributes & 0x03;
+    }
+    return -1;
+}
+
+/* Shared bulk/interrupt transfer with stall recovery + tracing. */
+static pakon_result do_transfer(pakon_dev *dev, uint8_t ep, uint8_t *buf,
+                                int len, int *transferred, unsigned timeout_ms)
+{
+    int type = endpoint_type(dev, ep);
+    if (type < 0) {
+        pakon_logf(PAKON_LOG_ERROR,
+                   "endpoint 0x%02x not present in alt setting %u",
+                   ep, dev->cur_alt);
+        return PAKON_ERR_PARAM;
+    }
+
+    int rc;
+    if (type == LIBUSB_TRANSFER_TYPE_INTERRUPT)
+        rc = libusb_interrupt_transfer(dev->handle, ep, buf, len,
+                                       transferred, timeout_ms);
+    else
+        rc = libusb_bulk_transfer(dev->handle, ep, buf, len,
+                                  transferred, timeout_ms);
+
+    if (rc == LIBUSB_ERROR_TIMEOUT) {
+        pakon_logf(PAKON_LOG_WARN, "endpoint 0x%02x: timeout (%d bytes moved)",
+                   ep, *transferred);
+        return PAKON_ERR_TIMEOUT;
+    }
+    if (rc == LIBUSB_ERROR_PIPE) {
+        /* Endpoint stalled; clear the halt so the next attempt can proceed. */
+        pakon_logf(PAKON_LOG_WARN, "endpoint 0x%02x stalled; clearing halt", ep);
+        libusb_clear_halt(dev->handle, ep);
+        return PAKON_ERR_USB;
+    }
+    if (rc != 0) {
+        pakon_logf(PAKON_LOG_ERROR, "endpoint 0x%02x transfer: %s", ep,
+                   libusb_strerror((enum libusb_error)rc));
+        return PAKON_ERR_USB;
+    }
+    return PAKON_OK;
+}
+
+pakon_result pakon_usb_send(pakon_dev *dev, uint8_t ep,
+                            const uint8_t *buf, size_t len,
+                            size_t *out_sent, unsigned timeout_ms)
+{
+    if (!dev || !dev->handle || !buf || (ep & 0x80))
+        return PAKON_ERR_PARAM;
+    if (!dev->claimed)
+        return PAKON_ERR_USB;
+
+    pakon_hexdump(PAKON_LOG_TRACE, "send", buf, len);
+    int moved = 0;
+    pakon_result r = do_transfer(dev, ep, (uint8_t *)buf, (int)len, &moved,
+                                 timeout_ms);
+    if (out_sent)
+        *out_sent = (size_t)moved;
+    return r;
+}
+
+pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t ep,
+                            uint8_t *buf, size_t len,
                             size_t *out_received, unsigned timeout_ms)
 {
-    (void)dev; (void)buf; (void)len; (void)timeout_ms;
     if (out_received)
         *out_received = 0;
-    return PAKON_ERR_UNIMPLEMENTED;   /* Phase 2 */
+    if (!dev || !dev->handle || !buf || !(ep & 0x80))
+        return PAKON_ERR_PARAM;
+    if (!dev->claimed)
+        return PAKON_ERR_USB;
+
+    int moved = 0;
+    pakon_result r = do_transfer(dev, ep, buf, (int)len, &moved, timeout_ms);
+    if (moved > 0)
+        pakon_hexdump(PAKON_LOG_TRACE, "recv", buf, (size_t)moved);
+    if (out_received)
+        *out_received = (size_t)moved;
+    return r;
 }

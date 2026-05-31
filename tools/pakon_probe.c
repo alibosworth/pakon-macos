@@ -9,25 +9,118 @@
  *                     COLD VID/PID before any driver loads (STOP POINT A).
  *   --load-firmware   download firmware to a cold device (gated until the cold
  *                     VID/PID is confirmed and filled into pakon_usb.h).
- *   --raw HEX         Phase 2.
+ *   --raw HEX         claim interface 0 at --alt, send HEX on --out, and (if
+ *                     --in given) read + dump the reply. Use this to find the
+ *                     command channel empirically (Phase 2).
  */
 #include "pakon_usb.h"
 #include "pakon_log.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "usage: %s [--list] [--load-firmware HEX] [--raw HEX] [--help]\n"
-        "  (default)         enumerate; if warm, print the endpoint map\n"
-        "  --list            dump all USB devices (for STOP POINT A)\n"
+        "usage: %s [--list] [--load-firmware HEX]\n"
+        "       %s --raw HEX --out 0xNN [--in 0xNN] [--alt N] [--timeout MS]\n"
+        "  (default)            enumerate; if warm, print the endpoint map\n"
+        "  --list               dump all USB devices\n"
         "  --load-firmware HEX  download firmware to a cold device  [gated]\n"
-        "  --raw HEX         send a hex string, dump the reply       [Phase 2]\n"
+        "  --raw HEX            send hex bytes (e.g. 0403100085) on --out\n"
+        "  --out 0xNN           OUT endpoint for --raw (required with --raw)\n"
+        "  --in 0xNN            IN endpoint to read the reply from (optional)\n"
+        "  --alt N              interface-0 alt setting to select (default 1)\n"
+        "  --timeout MS         per-transfer timeout (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0);
+        argv0, argv0);
+}
+
+/* Parse a hex string (optional spaces) into bytes. Returns count, or -1. */
+static int parse_hex(const char *s, uint8_t *out, size_t max)
+{
+    size_t n = 0;
+    int hi = -1;
+    for (; *s; s++) {
+        if (*s == ' ' || *s == ':' || *s == ',') continue;
+        int v;
+        if (*s >= '0' && *s <= '9') v = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') v = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'F') v = *s - 'A' + 10;
+        else return -1;
+        if (hi < 0) { hi = v; }
+        else {
+            if (n >= max) return -1;
+            out[n++] = (uint8_t)((hi << 4) | v);
+            hi = -1;
+        }
+    }
+    if (hi >= 0) return -1;   /* odd number of nibbles */
+    return (int)n;
+}
+
+static int do_raw(pakon_ctx *ctx, int alt, int out_ep, int in_ep,
+                  const char *hex, unsigned timeout)
+{
+    uint8_t payload[1024];
+    int plen = parse_hex(hex, payload, sizeof(payload));
+    if (plen < 0) {
+        fprintf(stderr, "--raw: invalid hex string\n");
+        return 2;
+    }
+    if (out_ep < 0) {
+        fprintf(stderr, "--raw requires --out 0xNN\n");
+        return 2;
+    }
+
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open failed: %s\n", pakon_result_str(r));
+        return 1;
+    }
+
+    int rc = 1;
+    r = pakon_usb_claim(dev, 0, (uint8_t)alt);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "claim failed: %s\n", pakon_result_str(r));
+        goto out;
+    }
+
+    size_t sent = 0;
+    printf("sending %d byte(s) on ep 0x%02x (alt %d)...\n", plen, out_ep, alt);
+    r = pakon_usb_send(dev, (uint8_t)out_ep, payload, (size_t)plen, &sent,
+                       timeout);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "send: %s (%zu sent)\n", pakon_result_str(r), sent);
+        goto out;
+    }
+    printf("sent %zu byte(s)\n", sent);
+
+    if (in_ep >= 0) {
+        uint8_t reply[1024];
+        size_t got = 0;
+        r = pakon_usb_recv(dev, (uint8_t)in_ep, reply, sizeof(reply), &got,
+                           timeout);
+        if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) {
+            fprintf(stderr, "recv: %s\n", pakon_result_str(r));
+            goto out;
+        }
+        printf("received %zu byte(s) on ep 0x%02x:\n", got, in_ep);
+        for (size_t i = 0; i < got; i++) {
+            printf("%02x ", reply[i]);
+            if ((i & 15) == 15) printf("\n");
+        }
+        if (got % 16) printf("\n");
+    }
+    rc = 0;
+
+out:
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    return rc;
 }
 
 /* Best-effort hint to help spot the cold FX2 bootloader in --list output.
@@ -132,6 +225,8 @@ int main(int argc, char **argv)
     int want_list = 0;
     const char *firmware_hex = NULL;
     const char *raw_hex = NULL;
+    int alt = 1, out_ep = -1, in_ep = -1;
+    unsigned timeout = 1000;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -143,6 +238,14 @@ int main(int argc, char **argv)
             firmware_hex = argv[++i];
         } else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
             raw_hex = argv[++i];
+        } else if (!strcmp(argv[i], "--out") && i + 1 < argc) {
+            out_ep = (int)strtol(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--in") && i + 1 < argc) {
+            in_ep = (int)strtol(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--alt") && i + 1 < argc) {
+            alt = (int)strtol(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
+            timeout = (unsigned)strtoul(argv[++i], NULL, 0);
         } else {
             fprintf(stderr, "unknown/incomplete argument: %s\n", argv[i]);
             usage(argv[0]);
@@ -178,9 +281,9 @@ int main(int argc, char **argv)
     }
 
     if (raw_hex) {
-        printf("--raw: not yet implemented (Phase 2)\n");
+        exit_code = do_raw(ctx, alt, out_ep, in_ep, raw_hex, timeout);
         pakon_usb_exit(ctx);
-        return 1;
+        return exit_code;
     }
 
     /* Default: classify, and if warm, dump the endpoint map. */

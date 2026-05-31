@@ -127,16 +127,36 @@ void pakon_usb_dev_ids(const pakon_dev *dev, uint16_t *vid, uint16_t *pid);
 pakon_result pakon_usb_endpoints(pakon_dev *dev, pakon_endpoint *eps,
                                  size_t max, size_t *out_count);
 
-/* ---- raw bulk I/O (Phase 2) ---- */
+/* ---- interface claim / alt-setting selection (Phase 2) ---- */
 
 /*
- * Send exactly `len` bytes on the command endpoint / receive up to `len` bytes
- * from the bulk-IN endpoint. Exact sizing, libusb timeouts, and full hexdump
- * tracing (via pakon_log) are part of the contract. STUB until Phase 2.
+ * Claim interface `ifc` and select alternate setting `alt`. On Linux this
+ * auto-detaches any kernel driver first. Must be called before send/recv so
+ * the right endpoints are active (the FX2 bulk endpoints only exist in a
+ * non-default alt setting). Records the current ifc/alt so send/recv can
+ * dispatch bulk vs interrupt transfers correctly.
  */
-pakon_result pakon_usb_send(pakon_dev *dev, const uint8_t *buf, size_t len,
-                            unsigned timeout_ms);
-pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t *buf, size_t len,
+pakon_result pakon_usb_claim(pakon_dev *dev, uint8_t ifc, uint8_t alt);
+pakon_result pakon_usb_release(pakon_dev *dev);
+
+/* ---- raw I/O on an explicit endpoint (Phase 2) ---- */
+
+/*
+ * Transfer on endpoint `ep` (full bEndpointAddress incl. direction bit). The
+ * transfer type (bulk vs interrupt) is looked up from the endpoint map of the
+ * currently-selected alt setting, so the caller need only give the address.
+ * Exact sizing, a libusb timeout, full hexdump tracing, and stall (PIPE)
+ * recovery via clear_halt are part of the contract. The command endpoint is
+ * not hardcoded because it has not yet been confirmed on hardware.
+ *
+ * send: writes exactly `len` bytes; `*out_sent` gets the count actually sent.
+ * recv: reads up to `len` bytes; `*out_received` gets the count received.
+ */
+pakon_result pakon_usb_send(pakon_dev *dev, uint8_t ep,
+                            const uint8_t *buf, size_t len,
+                            size_t *out_sent, unsigned timeout_ms);
+pakon_result pakon_usb_recv(pakon_dev *dev, uint8_t ep,
+                            uint8_t *buf, size_t len,
                             size_t *out_received, unsigned timeout_ms);
 
 #ifdef __cplusplus
