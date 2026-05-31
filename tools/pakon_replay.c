@@ -554,6 +554,59 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     if (film_seen_out) *film_seen_out = film_seen;
 }
 
+/* Replay the captured teardown tail: every O/C line AFTER the last image read.
+ * This is the driver's stop + engine-reset sequence (the bare 92/a2 stop plus
+ * the PICM/PICL register resets that follow). Without it the engines are left
+ * mid-state and the NEXT operation (e.g. advance) hangs. The many trailing
+ * idle polls are harmless read-only status reads. Returns commands replayed,
+ * 0 if the script has no image reads, -1 on open failure. */
+static long sm_replay_teardown(pakon_dev *dev, const char *script, unsigned timeout,
+                               unsigned long *ncmd, unsigned long *errs)
+{
+    FILE *fp = fopen(script, "r");
+    if (!fp) return -1;
+    char line[1024];
+    long ln = 0, lastM = -1;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line; while (*p == ' ' || *p == '\t') p++;
+        if (*p == 'M') lastM = ln;
+        ln++;
+    }
+    if (lastM < 0) { fclose(fp); return 0; }
+
+    rewind(fp);
+    uint8_t buf[65536];
+    long cur = 0, replayed = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (cur++ <= lastM) continue;               /* skip up to the last M */
+        char *p = line; while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0') continue;
+        if (*p == 'O') {
+            int n = hexbytes(p + 1, buf, sizeof(buf));
+            if (n < 0) continue;
+            size_t sent = 0, got = 0;
+            pakon_result r = pakon_usb_send(dev, PAKON_EP_CMD_OUT, buf, (size_t)n, &sent, timeout);
+            if (r == PAKON_OK)
+                r = pakon_usb_recv(dev, PAKON_EP_CMD_IN, buf, sizeof(buf), &got, timeout);
+            if (r != PAKON_OK) (*errs)++;
+            (*ncmd)++; replayed++;
+        } else if (*p == 'C') {
+            unsigned brt, breq, wval, widx, wlen; int consumed = 0;
+            if (sscanf(p + 1, "%x %x %x %x %x%n", &brt,&breq,&wval,&widx,&wlen,&consumed) != 5)
+                continue;
+            int dn = hexbytes(p + 1 + consumed, buf, sizeof(buf)); if (dn < 0) dn = 0;
+            size_t got = 0;
+            pakon_result r = pakon_usb_control(dev, (uint8_t)brt, (uint8_t)breq,
+                                               (uint16_t)wval, (uint16_t)widx, buf,
+                                               (uint16_t)wlen, &got, timeout);
+            if (r != PAKON_OK) (*errs)++;
+            (*ncmd)++; replayed++;
+        }
+    }
+    fclose(fp);
+    return replayed;
+}
+
 static int do_scan_sm(const char *script, const char *image_path, unsigned timeout,
                       unsigned long max_mb)
 {
@@ -652,14 +705,22 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
             fprintf(stderr, "  [sm] WARNING: no film ever detected in the stream "
                     "(stale device state / nothing loaded?)\n");
 
-        /* Phase 3: stop the engines (halt readout, then motor). The loop only
-         * issued read-only polls, so the command channel is still alive here. */
-        uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
-        uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
-        sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
-        sm_cmd(dev, stop_motor,   sizeof(stop_motor),   NULL, timeout);
-        ncmd += 2;
-        printf("  [sm] sent stop (readout 92, motor a2)\n");
+        /* Phase 3: replay the captured teardown (stop + engine reset). The loop
+         * only issued read-only polls, so the command channel is alive here. A
+         * bare 92/a2 leaves the engines mid-state and hangs the next op, so we
+         * replay the driver's full teardown tail; bare stop is the fallback. */
+        printf("  [sm] replaying captured teardown (stop + engine reset)...\n");
+        long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
+        if (td > 0) {
+            printf("  [sm] teardown: %ld commands replayed (engines reset to idle)\n", td);
+        } else {
+            uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
+            uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
+            sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
+            sm_cmd(dev, stop_motor,   sizeof(stop_motor),   NULL, timeout);
+            ncmd += 2;
+            printf("  [sm] no teardown tail in script; sent bare stop (92, a2)\n");
+        }
     }
     (void)took_over;
 

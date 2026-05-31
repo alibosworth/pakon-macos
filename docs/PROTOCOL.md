@@ -246,6 +246,14 @@ Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT` 90, `SM_TRAIL_WHITE` 8,
 primary/faster stop (fires on trailing white *data*, before the film ejects);
 the empty-window backstop covers the case where the device just stops feeding.
 
+**Teardown matters.** After the image phase the loop replays the captured
+*teardown tail* — every command after the last image read in the `.pakscan`:
+the `92`/`a2` stop **plus** the PICM/PICL register resets (`0206…0917xx`,
+`0205 20 02 06 xx`) that follow it. A bare `92`/`a2` leaves the engines
+mid-state and **hangs the next operation** (e.g. a following `advance` does
+nothing until the scanner is power-cycled). The long run of trailing `03 01 10`
+idle polls in the tail is harmless read-only chatter.
+
 ### Command verbs (EP1, from frequencies)
 
 - `04 03 <addr> 00 <p>` — query/command to an address (open, PIC probe, kick).
