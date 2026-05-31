@@ -6,16 +6,21 @@ marked **TBD** or **inferred** — do not treat inferred items as ground truth.
 
 ## Identities
 
-- **Warm (post-firmware):** `0F05:Fx35`, class `0xff` (vendor-specific), 3
-  endpoints. The PID (`F135`/`F235`/`F335`) is set by the firmware the FX2
-  booted and is **not** a reliable model indicator: a physical **F-135** unit
-  was observed enumerating as `0F05:F235`. Treat any `0F05:Fx35` as warm;
-  identify the actual model via the protocol layer (not the USB PID).
-- **Note on boot state:** at least one unit comes up *already warm* on
-  power-on (no host firmware download performed). That means either the board
-  auto-loads firmware from an onboard EEPROM, or a udev/fxload rule on the host
-  loaded it on plug. If firmware auto-loads, the host-side FX2 download
-  (Phase 1 task 2) is a fallback, not on the critical path for that unit.
+**Two firmware stages (observed on the F-135 unit):**
+
+1. **Bootstrap / "cold": `0F05:F235`**, class `0xff`, **no string descriptors**.
+   Auto-loaded from the onboard EEPROM on power-up. Its job is to receive a
+   second-stage firmware download. It does **not** implement the application
+   protocol — every bulk-OUT NAKs (see Phase 2 result below).
+2. **Operational / "warm": `0F05:F135` "Pakon F135-USB Film Scanner"** (has a
+   product string), reached after the working (Windows) driver downloads
+   stage-2 firmware. This matches the physical model and the documented PID.
+
+So the correct mapping is **cold = `0F05:F235`, warm = `0F05:F135`**, and the
+`F235 → F135` firmware download IS needed for standalone operation (it is not
+optional — the EEPROM only gets us to the bootstrap). The mechanism of that
+download (standard FX2 `0xA0` to RAM vs something else) is to be confirmed from
+the Phase 4 capture. PID still must not be used as a model indicator.
 - **Cold (FX2 bootloader):** **TBD** — confirm via `lsusb` (Linux) or
   `pakon_probe --list` / `system_profiler SPUSBDataType` (macOS) on a freshly
   powered scanner before any driver loads (Phase 1, STOP POINT A). Not guessed:
