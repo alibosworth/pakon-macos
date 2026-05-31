@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.16)
+project(pakon_sane C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
+endif()
+
+add_compile_options(-Wall -Wextra -Wshadow)
+
+# --- libusb-1.0 via pkg-config -------------------------------------------
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+
+# --- libpakon: transport + protocol + log --------------------------------
+add_library(pakon STATIC
+  src/pakon_log.c
+  src/pakon_proto.c
+  src/pakon_usb.c
+)
+target_include_directories(pakon PUBLIC ${CMAKE_SOURCE_DIR}/include)
+# libusb is an implementation detail of the transport layer, but a static
+# archive propagates its link deps; PkgConfig::LIBUSB carries the search dirs
+# so downstream targets (incl. test_proto) link cleanly.
+target_link_libraries(pakon PRIVATE PkgConfig::LIBUSB)
+
+# --- tools (standalone, NOT SANE) ----------------------------------------
+add_executable(pakon_probe tools/pakon_probe.c)
+target_link_libraries(pakon_probe PRIVATE pakon)
+
+add_executable(pakon_replay tools/pakon_replay.c)
+target_link_libraries(pakon_replay PRIVATE pakon)
+
+# --- tests (no hardware) --------------------------------------------------
+enable_testing()
+add_executable(test_proto test/test_proto.c)
+target_link_libraries(test_proto PRIVATE pakon)
+add_test(NAME test_proto COMMAND test_proto)
+
+# NOTE: the SANE backend (backend/pakon.c) is built in Phase 6 against an
+# installed sane-backends; it is intentionally not a target yet.
