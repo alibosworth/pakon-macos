@@ -96,9 +96,23 @@ Note: this contradicts the older "3 endpoints" note — that was approximate.
 - **EP2/EP4 OUT** = host→device bulk (commands / scan setup / bulk out).
 - **EP6/EP8 IN** = device→host, i.e. the **image stream** (high-volume bulk).
 - **Which alt setting the driver selects is unknown.** alt 1 (all bulk) is the
-  simplest candidate; alts 2/3 add interrupt/iso variants. The open-handshake
-  reply (`04 03 10 00 85` → `07 02 10 00`) on a candidate EP pair will tell us
-  the real command channel + alt. Use `pakon_probe --alt/--out/--in/--raw`.
+  simplest candidate; alts 2/3 add interrupt/iso variants.
+
+### Empirical result (`pakon_probe --probe-open`, warm F-235)
+
+Sending the documented 36-byte open packet to **every OUT endpoint in every alt
+setting (1–3) NAKs** — `libusb_bulk/interrupt_transfer` times out with 0 bytes
+moved, every time. This is device-side (run as root; claim + set-alt both
+succeed; a permission fault would be ACCESS, not a timeout). Conclusions:
+
+- The bulk/interrupt OUT FIFOs are **not armed** by raw writes — the device
+  needs an initialization step first.
+- The 36-byte command protocol is therefore **not raw bulk**. Most likely it is
+  carried over **EP0 vendor control transfers** (consistent with the original
+  Windows driver using an IOCTL to exchange 36-byte structs), and/or a control
+  "start"/arm precedes any bulk image traffic.
+- The required request codes / init sequence are **undocumented and must not be
+  guessed** (project rule). **→ Discover them from a real capture (Phase 4).**
 
 ## Scan path — **UNKNOWN (Phase 4-5)**
 

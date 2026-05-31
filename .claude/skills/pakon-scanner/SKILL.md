@@ -110,10 +110,16 @@ propagates to test binaries with correct search dirs.
   command endpoint is intentionally NOT hardcoded.
   - `pakon_probe --raw HEX --out 0xNN [--in 0xNN] [--alt N] [--timeout MS]`
     lets us probe endpoints empirically.
-- **Next:** find the command channel/alt by sending the documented open packet
-  (`04 03 10 00 85`, likely padded to the 36-byte frame) on candidate EP pairs
-  and watching for the `07 02 10 00` reply — that bridges into **Phase 3**
-  (framing + checksum derivation + open handshake in `pakon_replay --open`).
+- **Empirical wall hit (`--probe-open`):** the open packet NAKs on *every* OUT
+  endpoint in *every* alt setting (timeout, 0 bytes, device-side). So raw bulk
+  is NOT the command path — the device needs an init step, and the 36-byte
+  protocol is most likely **EP0 vendor control transfers** (matches the Windows
+  IOCTL). Request codes are undocumented; **do not guess them**.
+- **Next: Phase 4 capture.** Capture the working driver's USB traffic (Windows
+  + USBPcap/Wireshark, or Linux usbmon if a working tool can drive the scanner)
+  to learn the init/command mechanism, then resume Phase 3/5 from ground truth.
+  Build `docs/CAPTURE_GUIDE.md` + a capture-analysis parser (likely a Python
+  script under tools/) once the capture format is known.
 
 ## Dev / sync workflow
 
