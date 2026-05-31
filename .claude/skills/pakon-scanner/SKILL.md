@@ -115,11 +115,19 @@ propagates to test binaries with correct search dirs.
   is NOT the command path — the device needs an init step, and the 36-byte
   protocol is most likely **EP0 vendor control transfers** (matches the Windows
   IOCTL). Request codes are undocumented; **do not guess them**.
-- **Next: Phase 4 capture.** Capture the working driver's USB traffic (Windows
-  + USBPcap/Wireshark, or Linux usbmon if a working tool can drive the scanner)
-  to learn the init/command mechanism, then resume Phase 3/5 from ground truth.
-  Build `docs/CAPTURE_GUIDE.md` + a capture-analysis parser (likely a Python
-  script under tools/) once the capture format is known.
+- **Phase 4 in progress.** Setup: Linux host runs a **Windows VM with the
+  scanner passed through**; capture on the **host with usbmon** (passthrough
+  URBs traverse the host controller). Tooling is ready:
+  - `docs/CAPTURE_GUIDE.md` — host-usbmon→pcapng via dumpcap primary; in-VM
+    USBPcap fallback; usbmon-text quick path for the small handshake.
+  - `tools/analyze_capture.py` — ingests pcapng (via `tshark`), tshark TSV, or
+    usbmon text; prints a URB timeline; **decodes control setup packets (the
+    vendor request codes)** and 36-byte Pakon frames; summarizes distinct
+    transfer/endpoint/request combos.
+  - **Awaiting:** the human runs a real scan in the VM, captures it, commits to
+    `test/captures/` with timing notes, and runs the analyzer. The summary will
+    reveal the command mechanism (expected: EP0 vendor control) + request codes,
+    unblocking Phase 3 (open handshake) and Phase 5 (scan state machine).
 
 ## Dev / sync workflow
 
