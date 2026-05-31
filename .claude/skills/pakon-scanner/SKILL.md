@@ -150,10 +150,16 @@ propagates to test binaries with correct search dirs.
     `PAKON_EP_CMD_OUT/IN/IMAGE_IN` in pakon_usb.h.
   - `pakon_replay --open`: replays the captured open sequence and verifies each
     reply. Needs operational `0F05:F135` on the host.
-- **Testing caveat:** to run our code the device must be `f135` AND on the host
-  (not held by the VirtualBox VM). Cleanest: implement the `f235→f135` firmware
-  load ourselves (standard FX2; the firmware bytes can be extracted from the
-  `0xA0`/`0xA3` transfers in the capture, avoiding the need for the .hex blobs).
+- **Firmware load implemented (our own f235→f135).** Identities reclassified:
+  **cold=`0F05:F235`** (bootstrap), **warm=`0F05:F135`** (operational) — see
+  `PAKON_COLD_*`/`PAKON_WARM_*` and `pakon_is_warm_id` (f135 only). Approach:
+  extract the captured FX2 control-transfer sequence to a `.pakfw` script
+  (`analyze_capture.py --extract-firmware`) and replay it verbatim
+  (`pakon_usb_load_firmware` → `pakon_probe --load-firmware f135.pakfw`), then
+  wait for re-enumeration. `.pakfw` holds Kodak bytes → gitignored, regenerate
+  from a capture.
+- **Testing caveat:** the cold device must be on the HOST, not held by the VM
+  (disable the VirtualBox USB filter / shut down the VM first).
 - **Phase 5 TODO:** image bytes are NOT in the host-usbmon capture (usbfs
   passthrough drops large bulk-IN payloads; `0x86` chunks are 20480 bytes). Need
   an in-VM USBPcap capture for the image-stream format. Command vocabulary is

@@ -16,6 +16,27 @@ are not part of this project's clean-room work; this project only ships a copy
 for convenience and documents where it came from. If redistribution terms are
 unclear, the build can instead point at a user-supplied path.
 
+## Practical path on the test unit: replay from capture (`.pakfw`)
+
+The F-135 test unit's firmware load was decoded from a real capture: it is the
+standard FX2 sequence (`0xA0` internal RAM + `0xA3` external RAM + CPUCS
+`0xE600` reset). Rather than depend on the `.hex` blobs, we extract the exact
+control-transfer sequence from a capture and replay it:
+
+```sh
+# from a capture that includes the f235->f135 load (e.g. a scan capture):
+python3 tools/analyze_capture.py CAPTURE.pcapng --extract-firmware f135.pakfw
+# then, with the cold 0F05:F235 device attached to the host (not a VM):
+sudo ./build/pakon_probe --load-firmware f135.pakfw
+```
+
+`pakon_usb_load_firmware()` opens the cold `0F05:F235` device, replays each
+control transfer, and waits for re-enumeration to operational `0F05:F135`.
+
+The generated `.pakfw` contains Kodak firmware bytes, so it is **not committed**
+here — regenerate it from your own capture. The `.hex`/FX35Package route below
+remains the route for clean redistribution.
+
 ## Model → file mapping (TBD)
 
 Populate this table in Phase 1, when the correct `.hex` is copied in here and

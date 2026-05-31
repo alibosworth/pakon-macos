@@ -14,16 +14,14 @@
  * Bulk send/recv remain Phase 2.
  */
 #include "pakon_usb.h"
-#include "pakon_hex.h"
-
+#include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <libusb.h>
 
-/* --- FX2 (EZ-USB) firmware-download constants (standard, not invented) --- */
-#define FX2_VENDOR_RW   0xA0      /* vendor request: read/write internal RAM */
-#define FX2_CPUCS       0xE600    /* 8051 control reg; bit0 = hold-in-reset */
-#define FX2_RAM_MAX     0x4000    /* internal RAM extent for the data path */
+/* Per-control-transfer timeout when replaying the firmware script. */
 #define FX2_TIMEOUT_MS  2000
 
 #define MAX_ENDPOINTS   32
@@ -76,10 +74,7 @@ void pakon_usb_exit(pakon_ctx *ctx)
 
 int pakon_is_warm_id(uint16_t vid, uint16_t pid)
 {
-    return vid == PAKON_WARM_VID &&
-           (pid == PAKON_WARM_PID_F135 ||
-            pid == PAKON_WARM_PID_F235 ||
-            pid == PAKON_WARM_PID_F335);
+    return vid == PAKON_WARM_VID && pid == PAKON_WARM_PID;
 }
 
 static int is_warm(const struct libusb_device_descriptor *d)
@@ -87,12 +82,8 @@ static int is_warm(const struct libusb_device_descriptor *d)
     return pakon_is_warm_id(d->idVendor, d->idProduct);
 }
 
-/* Cold match is only meaningful once the IDs are confirmed (post STOP POINT A).
- * Until then PAKON_COLD_VID/PID are 0 and this never matches anything. */
 static int is_cold(const struct libusb_device_descriptor *d)
 {
-    if (PAKON_COLD_VID == 0 && PAKON_COLD_PID == 0)
-        return 0;
     return d->idVendor == PAKON_COLD_VID && d->idProduct == PAKON_COLD_PID;
 }
 
@@ -306,114 +297,122 @@ pakon_result pakon_usb_endpoints(pakon_dev *dev, pakon_endpoint *eps,
 }
 
 /* ------------------------------------------------------------------ */
-/* FX2 firmware download (Phase 1 task 2). Mechanism is the standard   */
-/* EZ-USB protocol; it is GATED behind a confirmed cold VID/PID so it  */
-/* cannot run against a guessed device.                                */
+/* Firmware download (f235 bootstrap -> f135 operational).             */
+/*                                                                     */
+/* We replay the exact FX2 control-transfer sequence captured from the */
+/* working driver (a .pakfw script produced by                         */
+/* tools/analyze_capture.py --extract-firmware). This is the standard  */
+/* EZ-USB load (0xA0 internal + 0xA3 external RAM + CPUCS reset),       */
+/* sourced from our own capture so no .hex blob is needed.             */
 /* ------------------------------------------------------------------ */
 
-/* Write `len` bytes to FX2 internal RAM at `addr` via vendor request 0xA0. */
-static pakon_result fx2_write_ram(libusb_device_handle *h, uint16_t addr,
-                                  const uint8_t *data, uint16_t len)
+/* Replay one control transfer line: "bmReqType bReq wValue wIndex wLen [data]"
+ * (all hex). Returns 0 on success, -1 on a malformed line, +1 on a USB error
+ * (tolerated near the end where the device renumerates out from under us). */
+static int replay_fw_line(libusb_device_handle *h, const char *line)
 {
-    int rc = libusb_control_transfer(
-        h,
-        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
-        FX2_VENDOR_RW, addr, 0,
-        (unsigned char *)data, len, FX2_TIMEOUT_MS);
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line == '#' || *line == '\0' || *line == '\n')
+        return 0;   /* comment / blank */
+
+    unsigned brt, breq, wval, widx, wlen;
+    int consumed = 0;
+    if (sscanf(line, "%x %x %x %x %x%n",
+               &brt, &breq, &wval, &widx, &wlen, &consumed) != 5)
+        return -1;
+
+    uint8_t data[64] = {0};
+    size_t dlen = 0;
+    const char *p = line + consumed;
+    while (dlen < sizeof(data)) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1]))
+            break;
+        unsigned byte;
+        sscanf(p, "%2x", &byte);
+        data[dlen++] = (uint8_t)byte;
+        p += 2;
+    }
+    if (wlen > sizeof(data))
+        return -1;
+
+    int rc = libusb_control_transfer(h, (uint8_t)brt, (uint8_t)breq,
+                                     (uint16_t)wval, (uint16_t)widx,
+                                     data, (uint16_t)wlen, FX2_TIMEOUT_MS);
     if (rc < 0) {
-        pakon_logf(PAKON_LOG_ERROR, "fx2 write @%04x: %s", addr,
-                   libusb_strerror((enum libusb_error)rc));
-        return PAKON_ERR_USB;
+        pakon_logf(PAKON_LOG_DEBUG, "fw xfer req=0x%02x val=0x%04x: %s",
+                   breq, wval, libusb_strerror((enum libusb_error)rc));
+        return 1;
     }
-    pakon_hexdump(PAKON_LOG_TRACE, "fx2 write", data, len);
-    return PAKON_OK;
+    pakon_hexdump(PAKON_LOG_TRACE, "fw xfer", data, wlen);
+    return 0;
 }
 
-/* Assert (reset=1) or release (reset=0) the 8051 by writing CPUCS. */
-static pakon_result fx2_reset(libusb_device_handle *h, int hold)
+/* Poll for the warm (f135) device to appear, up to `timeout_ms`. */
+static pakon_result wait_for_warm(pakon_ctx *ctx, unsigned timeout_ms)
 {
-    uint8_t v = hold ? 0x01 : 0x00;
-    return fx2_write_ram(h, FX2_CPUCS, &v, 1);
-}
-
-/* Validation-only callback (no hardware): checks each record fits in RAM. */
-static pakon_result fx2_validate_cb(uint32_t addr, const uint8_t *data,
-                                    uint8_t len, void *user)
-{
-    (void)data; (void)user;
-    if (addr + len > FX2_RAM_MAX) {
-        pakon_logf(PAKON_LOG_WARN,
-                   "fx2: record @%04x+%u exceeds expected RAM extent",
-                   addr, len);
+    for (unsigned waited = 0; waited <= timeout_ms; waited += 200) {
+        pakon_dev_class cls = PAKON_DEV_UNKNOWN;
+        if (pakon_usb_find(ctx, &cls) == PAKON_OK && cls == PAKON_DEV_WARM)
+            return PAKON_OK;
+        usleep(200000);
     }
-    return PAKON_OK;
+    return PAKON_ERR_TIMEOUT;
 }
 
-/* Download callback: each HEX data record becomes one RAM write. */
-static pakon_result fx2_record_cb(uint32_t addr, const uint8_t *data,
-                                  uint8_t len, void *user)
+pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *script_path)
 {
-    libusb_device_handle *h = (libusb_device_handle *)user;
-    return fx2_write_ram(h, (uint16_t)addr, data, len);
-}
-
-pakon_result pakon_usb_load_firmware(pakon_ctx *ctx, const char *hex_path)
-{
-    if (!ctx || !hex_path)
+    if (!ctx || !script_path)
         return PAKON_ERR_PARAM;
 
-    /*
-     * STOP POINT A gate: we will not download firmware until the cold FX2
-     * VID/PID is confirmed from real hardware and filled into PAKON_COLD_*.
-     * Targeting a guessed device could write 0xA0 control transfers to the
-     * wrong peripheral, so this is a hard stop, not a warning.
-     */
-    if (PAKON_COLD_VID == 0 && PAKON_COLD_PID == 0) {
-        pakon_logf(PAKON_LOG_ERROR,
-                   "cold FX2 VID/PID not configured — complete STOP POINT A "
-                   "(plug in the cold scanner, run lsusb/system_profiler, and "
-                   "set PAKON_COLD_VID/PID in pakon_usb.h) before loading "
-                   "firmware");
-        return PAKON_ERR_NO_DEVICE;
+    FILE *fp = fopen(script_path, "r");
+    if (!fp) {
+        pakon_logf(PAKON_LOG_ERROR, "cannot open firmware script '%s'",
+                   script_path);
+        return PAKON_ERR_FIRMWARE;
     }
 
-    /* Validate the HEX up front (hardware-free) before touching the bus. */
-    pakon_result r = pakon_hex_parse_file(hex_path, fx2_validate_cb, NULL);
-    if (r != PAKON_OK) {
-        pakon_logf(PAKON_LOG_ERROR, "firmware HEX failed validation: %s",
-                   pakon_result_str(r));
-        return r;
-    }
-
-    /* Open the cold device. */
+    /* Open the cold bootstrap device (0F05:F235). */
     libusb_device_handle *h =
         libusb_open_device_with_vid_pid(ctx->usb, PAKON_COLD_VID, PAKON_COLD_PID);
     if (!h) {
-        pakon_logf(PAKON_LOG_ERROR, "cannot open cold FX2 device %04x:%04x",
+        pakon_logf(PAKON_LOG_ERROR,
+                   "cannot open cold device %04x:%04x (is it in bootstrap "
+                   "state and free, i.e. not held by a VM?)",
                    PAKON_COLD_VID, PAKON_COLD_PID);
+        fclose(fp);
         return PAKON_ERR_NO_DEVICE;
     }
+    (void)libusb_set_auto_detach_kernel_driver(h, 1);
+    (void)libusb_claim_interface(h, 0);
 
-    /* Hold 8051 in reset, stream the firmware, release. */
-    r = fx2_reset(h, /*hold=*/1);
-    if (r == PAKON_OK)
-        r = pakon_hex_parse_file(hex_path, fx2_record_cb, h);
-    if (r == PAKON_OK)
-        r = fx2_reset(h, /*hold=*/0);
-
+    char line[8192];
+    unsigned n = 0, errs = 0;
+    pakon_result r = PAKON_OK;
+    while (fgets(line, sizeof(line), fp)) {
+        int rc = replay_fw_line(h, line);
+        if (rc < 0) {
+            pakon_logf(PAKON_LOG_ERROR, "malformed firmware line %u", n + 1);
+            r = PAKON_ERR_FIRMWARE;
+            break;
+        }
+        if (rc > 0)
+            errs++;     /* tolerated (renumeration tail) */
+        n++;
+    }
+    fclose(fp);
+    (void)libusb_release_interface(h, 0);
     libusb_close(h);
 
-    if (r != PAKON_OK) {
-        pakon_logf(PAKON_LOG_ERROR, "firmware download failed: %s",
-                   pakon_result_str(r));
+    if (r != PAKON_OK)
         return r;
-    }
 
     pakon_logf(PAKON_LOG_INFO,
-               "firmware sent; waiting for re-enumeration to a warm %04x:Fx35",
-               PAKON_WARM_VID);
-    /* Re-enumeration polling is finished in the post-STOP-POINT-A work. */
-    return PAKON_OK;
+               "replayed %u firmware transfers (%u late USB errors); "
+               "waiting for re-enumeration to %04x:%04x",
+               n, errs, PAKON_WARM_VID, PAKON_WARM_PID);
+
+    return wait_for_warm(ctx, 5000);
 }
 
 pakon_result pakon_usb_claim(pakon_dev *dev, uint8_t ifc, uint8_t alt)

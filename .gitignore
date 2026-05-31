@@ -10,3 +10,6 @@
 # local Claude Code state, but track shared project skills
 .claude/*
 !.claude/skills/
+
+# extracted firmware (Kodak bytes — regenerate from a capture)
+*.pakfw

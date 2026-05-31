@@ -9,9 +9,9 @@ _Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
 ## Phase status
 
 - **Phase 0 (scaffold):** done. CMake build, libpakon, tools, unit tests.
-- **Phase 1 (transport / enumerate / firmware-load):** done except our own
-  firmware download (see "decision" below). Real enumeration, warm open,
-  endpoint map, Intel HEX parser (unit-tested), FX2 download mechanism (gated).
+- **Phase 1 (transport / enumerate / firmware-load):** done. Real enumeration,
+  warm open, endpoint map, Intel HEX parser (unit-tested), and our own
+  `f235→f135` firmware load via captured `.pakfw` replay (awaiting hardware test).
 - **Phase 2 (raw bulk I/O):** done. `pakon_usb_claim`/`_release`,
   `pakon_usb_send/recv(dev, ep, …)` dispatching bulk vs interrupt, with
   timeout + stall recovery + tracing.
@@ -64,18 +64,37 @@ _Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
 - Linux needs `sudo` for libusb / usbmon. dumpcap drops privileges → capture to
   `/tmp` then `chown`.
 
-## OPEN DECISION — pick the next step (I asked, you deferred)
+## Firmware load — DONE (our own f235→f135), awaiting hardware test
 
-1. **Firmware-load + test Phase 3 (recommended).** I extract the f235→f135
-   sequence from the capture, set cold=f235/warm=f135, implement our own
-   firmware load (replay the control transfers). Then you disable the VirtualBox
-   USB filter so the host owns the device, and we test
-   `pakon_probe --load-firmware` → `pakon_replay --open` on real hardware.
-   This validates everything built so far.
-2. **Phase 5 image stream.** You do an in-VM USBPcap capture of a scan, copy it
-   here, I decode the `0x86` image format + scan-start commands.
-3. **Decode more protocol first.** Mine the 2218 command exchanges to map the
-   full configure/calibrate/scan-start sequence before writing more code.
+Implemented: identities reclassified cold=`0F05:F235`/warm=`0F05:F135`;
+`analyze_capture.py --extract-firmware f135.pakfw` extracts the captured FX2
+control-transfer sequence; `pakon_usb_load_firmware` replays it and waits for
+re-enumeration. `.pakfw` is gitignored (Kodak bytes) — regenerate from a capture.
+
+### NEXT: run the hardware test (needs the cold device on the HOST, not the VM)
+
+```sh
+# on this Mac (or wherever the scan capture is): generate the firmware script
+python3 tools/analyze_capture.py /Volumes/Video/pakon_scan.pcapng \
+  --extract-firmware f135.pakfw           # copy f135.pakfw to the scanner box
+
+# on the scanner box: free the device from the VM first!
+#   - shut down the Windows VM, or remove the VirtualBox USB filter, then replug
+#   - confirm the host sees the bootstrap:  lsusb | grep 0f05   -> 0f05:f235
+sudo ./build/pakon_probe --load-firmware f135.pakfw   # f235 -> f135
+sudo ./build/pakon_probe                              # should now show warm f135 + endpoints
+sudo ./build/pakon_replay --open                      # replay+verify open handshake
+```
+
+If `--load-firmware` can't open `0f05:f235`, the VM still owns it. If
+`--open` mismatches, paste the trace.
+
+## Other open directions (after the test)
+
+- **Phase 5 image stream:** need an in-VM USBPcap capture of a scan (host usbmon
+  can't see image bytes); decode `0x86` format + scan-start commands.
+- **Decode more protocol:** mine the 2218 command exchanges for the full
+  configure/calibrate/scan-start sequence.
 
 ## Handy commands
 

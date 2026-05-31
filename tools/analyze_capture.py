@@ -307,6 +307,47 @@ def decode_pakon_frame(data):
     return "PAKON " + " ".join(parts)
 
 
+# FX2 firmware-download vendor requests.
+FW_REQUESTS = {0xA0, 0xA3, 0xA4, 0xA9}
+
+
+def extract_firmware(recs, path, fw_device=None):
+    """Write the firmware-download control transfers to a replayable .pakfw
+    script: one line per transfer, `bmRequestType bRequest wValue wIndex
+    wLength [dataHex]` (all hex). Replayed verbatim by pakon_usb_load_firmware
+    to drive a cold f235 device to operational f135 — no .hex blob needed."""
+    subs = [r for r in recs if r.urb == "S" and r.setup
+            and r.setup.get("bRequest") in FW_REQUESTS]
+    if fw_device is None:
+        # bootstrap device = the one carrying the most 0xA0/0xA3 writes
+        cnt = Counter(r.dev for r in subs
+                      if r.setup["bRequest"] in (0xA0, 0xA3))
+        if not cnt:
+            sys.exit("no FX2 firmware transfers (0xA0/0xA3) found in capture")
+        fw_device = cnt.most_common(1)[0][0]
+    seq = [r for r in subs if r.dev == fw_device]
+    if not seq:
+        sys.exit(f"no firmware transfers on device {fw_device}")
+
+    with open(path, "w") as fh:
+        fh.write("# pakon firmware control-transfer script (from capture)\n")
+        fh.write(f"# device {fw_device}, {len(seq)} transfers\n")
+        fh.write("# bmRequestType bRequest wValue wIndex wLength [dataHex]\n")
+        for r in seq:
+            s = r.setup
+            line = (f"{s['bmRequestType']:02x} {s['bRequest']:02x} "
+                    f"{s['wValue']:04x} {s['wIndex']:04x} {s['wLength']:04x}")
+            if r.data:
+                line += " " + bytes(r.data).hex()
+            fh.write(line + "\n")
+    nbytes = sum(len(r.data) for r in seq)
+    reqs = Counter(r.setup["bRequest"] for r in seq)
+    print(f"wrote {path}: {len(seq)} transfers from device {fw_device}, "
+          f"{nbytes} firmware bytes")
+    print("  requests: " + ", ".join(f"0x{k:02x}×{v}"
+                                      for k, v in sorted(reqs.items())))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("capture")
@@ -320,6 +361,12 @@ def main():
     ap.add_argument("--commands", action="store_true",
                     help="hide standard/class USB chatter; show only vendor "
                          "control transfers + bulk/interrupt (the protocol)")
+    ap.add_argument("--extract-firmware", metavar="OUT.pakfw",
+                    help="extract the FX2 firmware-download control transfers "
+                         "(0xA0/0xA3/0xA4/0xA9) to a replayable script and exit")
+    ap.add_argument("--fw-device", type=int,
+                    help="device number of the firmware-load (bootstrap) device "
+                         "for --extract-firmware (auto-detected if omitted)")
     args = ap.parse_args()
 
     fmt = args.format
@@ -339,6 +386,10 @@ def main():
         with open(args.capture, "r", errors="replace") as fh:
             lines = fh.readlines()
         recs = parse_tshark_tsv(lines) if fmt == "tsv" else parse_usbmon_text(lines)
+
+    if args.extract_firmware:
+        extract_firmware(recs, args.extract_firmware, args.fw_device)
+        return
 
     # Inventory of (bus, device) before filtering — helps pick --device, since
     # the device number changes on every re-enumeration (e.g. across an

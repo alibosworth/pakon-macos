@@ -201,24 +201,21 @@ static int do_probe_open(pakon_ctx *ctx, unsigned timeout)
  * Diagnostic only — NOT used by any matching/classification logic. */
 static const char *device_hint(unsigned vid, unsigned pid)
 {
-    if (pakon_is_warm_id((uint16_t)vid, (uint16_t)pid))
-        return "  <-- warm Pakon (F-x35)";
-    if (vid == PAKON_WARM_VID)
-        return "  <-- Pakon vendor (unrecognized PID)";
-    if (vid == 0x04b4 || vid == 0x0547)
-        return "  <-- Cypress/Anchor vendor: possible FX2 bootloader?";
+    if (vid == PAKON_WARM_VID && pid == PAKON_WARM_PID)
+        return "  <-- operational Pakon (warm, f135)";
+    if (vid == PAKON_COLD_VID && pid == PAKON_COLD_PID)
+        return "  <-- Pakon bootstrap (cold, f235) — needs firmware load";
+    if (vid == PAKON_VID)
+        return "  <-- Pakon vendor (other PID)";
     return "";
 }
 
-/* Label a warm PID. NOTE: the PID is set by the booted firmware, not the
- * physical model — an F-135 has been seen reporting F235 — so this is only a
- * PID-family hint, not the real model. */
+/* Label a Pakon PID (state, not physical model — the PID is firmware-set). */
 static const char *pakon_pid_family(uint16_t pid)
 {
     switch (pid) {
-    case PAKON_WARM_PID_F135: return "Fx35/F135";
-    case PAKON_WARM_PID_F235: return "Fx35/F235";
-    case PAKON_WARM_PID_F335: return "Fx35/F335";
+    case PAKON_WARM_PID: return "operational/f135";
+    case PAKON_COLD_PID: return "bootstrap/f235";
     }
     return "unknown";
 }

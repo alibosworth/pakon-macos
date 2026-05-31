@@ -24,18 +24,21 @@ extern "C" {
 #endif
 
 /*
- * Warm (post-firmware) Pakon identity. The VID is constant; the PID is set by
- * whatever firmware the FX2 booted and is NOT a reliable model indicator — a
- * physical F-135 unit has been observed enumerating as 0F05:F235. We therefore
- * treat the whole F-x35 PID family as "warm"; the real model is identified at
- * the protocol layer, not from the USB PID.
+ * Pakon identities, CONFIRMED on the F-135 hardware via USB capture:
+ *   - COLD  = 0F05:F235 = EEPROM bootstrap (no strings); needs a stage-2
+ *             firmware download. Implements no application protocol.
+ *   - WARM  = 0F05:F135 = operational ("Pakon F135-USB Film Scanner") after
+ *             the firmware download; this is the device we drive.
+ * The PID is set by the booted firmware, not a clean model code, so other
+ * models (F-235/F-335) may differ — those are theoretical until tested.
  */
-#define PAKON_WARM_VID        0x0F05
-#define PAKON_WARM_PID_F135   0xF135   /* Pakon F-135 */
-#define PAKON_WARM_PID_F235   0xF235   /* Pakon F-235 (verified hardware) */
-#define PAKON_WARM_PID_F335   0xF335   /* Pakon F-335 */
+#define PAKON_VID        0x0F05
+#define PAKON_WARM_VID   PAKON_VID
+#define PAKON_WARM_PID   0xF135   /* operational (this F-135 unit) */
+#define PAKON_COLD_VID   PAKON_VID
+#define PAKON_COLD_PID   0xF235   /* EEPROM bootstrap (this F-135 unit) */
 
-/* True if vid:pid is a known warm Pakon (any F-x35 model). */
+/* True if vid:pid is the operational (warm) Pakon. */
 int pakon_is_warm_id(uint16_t vid, uint16_t pid);
 
 /*
@@ -45,14 +48,6 @@ int pakon_is_warm_id(uint16_t vid, uint16_t pid);
 #define PAKON_EP_CMD_OUT   0x01   /* command frames host -> device */
 #define PAKON_EP_CMD_IN    0x81   /* command reply / status device -> host */
 #define PAKON_EP_IMAGE_IN  0x86   /* bulk image stream device -> host */
-
-/*
- * Cold (pre-firmware, FX2 bootloader) identity. UNKNOWN until confirmed via
- * lsusb on a freshly powered scanner — see STOP POINT A in Phase 1. These are
- * deliberately left as 0 so nothing accidentally matches a guessed value.
- */
-#define PAKON_COLD_VID   0x0000
-#define PAKON_COLD_PID   0x0000
 
 typedef enum {
     PAKON_DEV_UNKNOWN = 0,
