@@ -67,27 +67,47 @@ def guess_stride(args):
     try:
         import numpy as np
     except ImportError:
-        sys.exit("--guess-stride needs numpy (pip install numpy), or just try "
-                 "candidate --width values by eye")
+        sys.exit("--guess-stride needs numpy (pip install numpy / apt install "
+                 "python3-numpy), or just try candidate --width values by eye")
+
+    import os
+    fsize = os.path.getsize(args.raw)
+    # Sample from deep in the file by default, to skip the leader/calibration
+    # region at the start (real image content gives a clean row peak).
+    off = args.offset if args.offset else min(fsize // 3, max(0, fsize - args.sample))
     with open(args.raw, "rb") as f:
-        f.seek(args.offset)
+        f.seek(off)
         sample = np.frombuffer(f.read(args.sample), dtype=np.uint8).astype(np.float32)
-    sample -= sample.mean()
-    # autocorrelation via FFT; the row stride shows up as a strong peak
-    n = 1 << (len(sample) - 1).bit_length()
-    fft = np.fft.rfft(sample, n)
-    ac = np.fft.irfft(fft * np.conj(fft))[:args.max_stride]
+    print(f"sampling {len(sample)} bytes from offset {off} (file {fsize})")
+
+    # High-pass (first difference) removes slow gradients/DC so the row-stride
+    # periodicity dominates the autocorrelation.
+    x = np.diff(sample)
+    x -= x.mean()
+    n = 1 << (len(x) - 1).bit_length()
+    fft = np.fft.rfft(x, n)
+    ac = np.fft.irfft(fft * np.conj(fft))[:args.max_stride + 1]
+    # Normalize for the shrinking overlap at larger lags.
+    lags = np.arange(len(ac))
+    ac = ac / np.maximum(len(x) - lags, 1)
     ac[:args.min_stride] = 0
-    order = np.argsort(ac)[::-1]
-    print("top stride candidates (bytes/line):")
+
+    # Find local maxima (real peaks), rank by height.
+    lo, hi = args.min_stride, len(ac) - 1
+    peaks = [(ac[L], L) for L in range(max(lo, 1), hi)
+             if ac[L] > ac[L - 1] and ac[L] >= ac[L + 1]]
+    peaks.sort(reverse=True)
+    print("top stride candidates (bytes/line), strongest first:")
     seen = []
-    for idx in order:
-        if all(abs(idx - s) > 8 for s in seen):
-            seen.append(int(idx))
-            print(f"  {int(idx):6d}  (score {ac[idx]:.3e})")
-        if len(seen) >= 8:
+    for score, L in peaks:
+        if all(abs(L - s) > 16 for s in seen):
+            seen.append(L)
+            facs = [f"{L//d}px@{d}Bpp" for d in (1, 2, 3, 6) if L % d == 0]
+            print(f"  {L:6d}  (score {score:.3e})   {'  '.join(facs)}")
+        if len(seen) >= 10:
             break
-    print("\ndivide a stride by 1/2/3/6 bytes-per-pixel to get the pixel width.")
+    print("\nThe true row stride should appear with its harmonics (2x, 3x...).")
+    print("width = stride / (channels * bytes_per_sample); RGB16 => /6, RGB8 => /3.")
 
 
 def main():
