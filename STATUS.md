@@ -92,7 +92,8 @@ frame, so resampling may be wanted. Then Phase 6 (SANE backend).
 - **Phase 5 (scan state machine + image):** DONE and **VALIDATED ON HARDWARE**
   (Linux + macOS). `pakon_replay --scan` drives a real scan; `pakon_image.py`
   decodes the output to 16-bit RGB TIFFs with registration and autocrop.
-- **Phase 6 (SANE backend), 7 (hardening):** not started.
+- **Phase 6 (Swift macOS app):** not started. **Current priority.**
+- **Phase 7 (SANE backend / Linux), 8 (hardening):** not started.
 
 ## Confirmed hardware/protocol facts (from real captures)
 

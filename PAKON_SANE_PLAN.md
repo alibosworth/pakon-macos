@@ -208,48 +208,76 @@ a real strip of film, on at least one OS. This is the make-or-break milestone.
 
 ---
 
-## Phase 6 — SANE backend shim
+## Phase 6 — Native macOS app (Swift) ← CURRENT PRIORITY
 
-**Goal:** Wrap the working protocol layer in SANE so standard frontends drive it.
+**Goal:** A self-contained macOS `.app` that photographers can download and run — no
+terminal, no Homebrew, no SANE. This is the real gap: Windows users have TLX running on
+Windows 11; macOS has nothing.
+
+**USB transport:** Use macOS-native IOKit (`IOUSBLib`) instead of libusb. IOKit works from
+a notarized app without a kernel extension or sandbox exception; the scanner has no system
+driver claiming it. This removes the libusb dependency for the Mac app entirely.
+
+**Architecture:** libpakon (the C transport/protocol core) stays as-is. The Swift app
+links against a thin IOKit-backed transport layer (replacing or wrapping `pakon_usb.c` for
+macOS) and calls into the existing protocol and command logic via a bridging header.
+
+Tasks:
+1. IOKit transport layer: device enumeration (`IOUSBDevice`), firmware load, bulk I/O
+   (`IOUSBPipe`). Mirror the `pakon_usb` API so the rest of the stack is unchanged.
+2. SwiftUI app shell: device detection (connect/disconnect notifications), status display,
+   scan button, progress bar, output folder picker.
+3. Firmware load flow: detect cold `0F05:F235`, load `.pakfw`, wait for warm `0F05:F135`.
+   Bundle `f135.pakfw` in the app resources.
+4. Scan flow: open handshake → scan (drive `scan_fullroll.pakscan` sequence) → stream
+   `0x86` to a temp file. Progress = bytes received / expected total.
+5. Image decode in Swift: port `pakon_image.py` logic to Swift/Accelerate — deinterleave
+   B,R,G, co-register trilinear lines, autocrop, write 16-bit RGB TIFF via ImageIO.
+6. Frame splitting: auto-detect frame boundaries from the ribbon and export individual
+   frames (replaces `--frames N`).
+7. Distribution: sign + notarize outside the App Store; document the process.
+
+**Exit criteria:** A notarized `.app` that a Mac user can drag to Applications, plug in the
+scanner, click Scan, and get TIFFs — on macOS 13+.
+
+---
+
+## Phase 7 — SANE backend shim (Linux / power users)
+
+**Goal:** Wrap the working protocol layer in SANE so standard frontends (`scanimage`,
+`gscan2pdf`, etc.) drive it on Linux. Lower priority than the Mac app — Linux users can
+already use `pakon_replay` directly.
 
 Tasks:
 1. Implement entry points in `backend/pakon.c`, each delegating to lower layers:
    - `sane_init`/`sane_exit` → libusb ctx lifecycle.
    - `sane_get_devices` → enumerate; firmware-load cold devices first.
    - `sane_open`/`sane_close` → claim + open handshake to Idle.
-   - `sane_get_option_descriptor`/`sane_control_option` → **minimal** options first:
-     resolution and mode (color/gray) only. Expand later.
-   - `sane_get_parameters` → report geometry/depth derived from selected resolution.
-   - `sane_start` → run CONFIGURE→CALIBRATE→SCAN.
-   - `sane_read` → stream image bytes in chunks into the frontend's buffer.
+   - `sane_get_option_descriptor`/`sane_control_option` → minimal options first.
+   - `sane_start` → run CONFIGURE→SCAN.
+   - `sane_read` → stream image bytes into the frontend's buffer.
    - `sane_cancel` → drive the CANCEL transitions safely.
-2. Ship `pakon.conf` (USB IDs) and a `dll.conf` fragment. Document install paths for Linux
-   (sane-backends dirs) and macOS.
-3. Build the backend as a proper SANE dynamic backend against installed sane-backends.
+2. Ship `pakon.conf` (USB IDs) and a `dll.conf` fragment.
+3. Build as a proper SANE dynamic backend against installed sane-backends.
 
-**Exit criteria (hardware):** `scanimage -d pakon ... > out.pnm` yields a correct image via
-the standard SANE path, on Linux. Then confirm on macOS (sane-backends via Homebrew).
+**Exit criteria (hardware):** `scanimage -d pakon > out.pnm` yields a correct image on Linux.
 
 ---
 
-## Phase 7 — Hardening, options, and reach
+## Phase 8 — Hardening, options, and reach
 
-**Goal:** Make it usable, not just demoable.
+**Goal:** Make both the Mac app and the SANE backend robust for real-world use.
 
 Tasks:
-1. Expand SANE options: bit depth, Digital ICE toggle (if drivable), multi-frame roll
-   handling, preview mode, geometry/crop.
-2. Robust error recovery: device unplug mid-scan, USB 3.0 controller quirks (the blog hit a
-   USB-3-specific crash — verify our libusb path is clean), timeouts, re-init.
-3. Support the variants: F-235/F-335 and the "Plus" models — wire the address enum
-   `_PLUS` values and per-model firmware selection. Gate on whatever hardware I can test.
-4. macOS packaging notes: codesigning/entitlements if a frontend needs them; Image Capture
-   bridging is out of scope but note the path.
-5. README: supported models matrix (tested vs theoretical), install instructions, the
-   firmware provenance/legal note, and a clear "reverse-engineered, unofficial" disclaimer.
+1. Scan modes: whole roll, fixed frame count (4/5/6), preview.
+2. Robust error recovery: device unplug mid-scan, timeouts, re-init, film jam handling
+   (use the advance command to clear).
+3. Support the variants: F-235/F-335 and the "Plus" models — per-model firmware selection,
+   address enum `_PLUS` values. Gate on available hardware.
+4. README: supported models matrix (tested vs theoretical), install instructions,
+   firmware provenance/legal note, "reverse-engineered, unofficial" disclaimer.
 
-**Exit criteria:** A tagged 0.1 release that a third party with the same scanner can build
-and use on Linux from the README alone.
+**Exit criteria:** A tagged 0.1 release usable by a third party on macOS from the README alone.
 
 ---
 
@@ -265,9 +293,9 @@ and use on Linux from the README alone.
   trailing byte is a command param. Confirmed from the full 2218-command capture set.
 - **Single-tester hardware**: only the F-135 has been validated; F-235/F-335/Plus remain
   theoretical. Mark clearly in the support matrix.
-- **Phase 6 SANE claiming on macOS**: the backend will need to claim the USB interface
-  from within the SANE framework — test early; the standalone libusb path works but
-  the SANE plugin context may differ.
+- **IOKit bulk transfer reliability**: IOKit `IOUSBPipe` bulk I/O has its own quirks
+  (packet sizing, timeouts, stall clearing). Validate early against the real scanner
+  before building the full app on top of it.
 
 ## What I (the human) must provide, and when
 
@@ -275,5 +303,6 @@ and use on Linux from the README alone.
 - ~~Phase 3: open-handshake replay trace.~~ Done.
 - ~~Phase 4: Windows scan captures.~~ Done.
 - ~~Phase 5: scan replay + image decode.~~ Done (Linux + macOS).
-- **Phase 6**: run `scanimage -d pakon` end-to-end on Linux, then macOS.
+- **Phase 6**: run the Swift app end-to-end on macOS — plug in scanner, click Scan, get TIFFs.
+- **Phase 7**: run `scanimage -d pakon` end-to-end on Linux.
 - Throughout: a physical scanner and both a Linux and a macOS machine.

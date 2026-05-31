@@ -7,7 +7,8 @@ protocol notes and our own USB captures.
 
 > **Status:** Phases 0–5 complete. Full end-to-end scan works on hardware —
 > firmware load, open handshake, scan drive, and image decode are all
-> validated. Phase 6 (SANE backend shim) is next.
+> validated on Linux and macOS. Phase 6 is a native Swift macOS app (IOKit
+> transport, SwiftUI, no SANE dependency). SANE backend for Linux follows.
 
 ## Architecture
 
