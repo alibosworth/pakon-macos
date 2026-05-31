@@ -15,10 +15,11 @@ _Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
 - **Phase 2 (raw bulk I/O):** done. `pakon_usb_claim`/`_release`,
   `pakon_usb_send/recv(dev, ep, …)` dispatching bulk vs interrupt, with
   timeout + stall recovery + tracing.
-- **Phase 3 (framing + command primitive + open handshake):** IMPLEMENTED,
-  **not yet tested on hardware**. `pakon_proto` build/serialize/parse (wire =
-  2+count); `pakon_cmd.[ch]` over EP1; `pakon_replay --open` replays the
-  captured open sequence and verifies replies. Framing unit-tested vs real bytes.
+- **Phase 3 (framing + command primitive + open handshake):** DONE and
+  **VALIDATED ON HARDWARE** (2026-05-31). `pakon_replay --open` reached Idle —
+  all 5 steps OK, replies byte-for-byte matching the capture. `pakon_proto`
+  build/serialize/parse (wire = 2+count); `pakon_cmd.[ch]` over EP1.
+  End-to-end proven from our code: load-firmware → enumerate → claim → open.
 - **Phase 4 (capture):** essentially done for the command path. `tools/
   analyze_capture.py` parses pcapng natively. Captures live on the Linux box;
   the scan capture was copied to this Mac at `/Volumes/Video/pakon_scan.pcapng`
@@ -64,37 +65,37 @@ _Last updated: 2026-05-31. Last commit on `main`: `bc1d2d5`._
 - Linux needs `sudo` for libusb / usbmon. dumpcap drops privileges → capture to
   `/tmp` then `chown`.
 
-## Firmware load — DONE (our own f235→f135), awaiting hardware test
+## Firmware load — DONE and VALIDATED on hardware
 
-Implemented: identities reclassified cold=`0F05:F235`/warm=`0F05:F135`;
-`analyze_capture.py --extract-firmware f135.pakfw` extracts the captured FX2
-control-transfer sequence; `pakon_usb_load_firmware` replays it and waits for
-re-enumeration. `.pakfw` is gitignored (Kodak bytes) — regenerate from a capture.
+cold=`0F05:F235`/warm=`0F05:F135`; `analyze_capture.py --extract-firmware
+f135.pakfw` extracts the captured FX2 sequence; `pakon_usb_load_firmware`
+replays it and waits for re-enumeration. Confirmed working on the box:
+`--load-firmware f135.pakfw` brought f235→f135, then `--open` reached Idle.
+(`.pakfw` gitignored — regenerate from a capture. Free the device from the VM
+first: shut down the VM / drop the 0f05 USB filter, replug, `lsusb`→0f05:f235.)
 
-### NEXT: run the hardware test (needs the cold device on the HOST, not the VM)
-
+To repeat the working test:
 ```sh
-# on this Mac (or wherever the scan capture is): generate the firmware script
-python3 tools/analyze_capture.py /Volumes/Video/pakon_scan.pcapng \
-  --extract-firmware f135.pakfw           # copy f135.pakfw to the scanner box
-
-# on the scanner box: free the device from the VM first!
-#   - shut down the Windows VM, or remove the VirtualBox USB filter, then replug
-#   - confirm the host sees the bootstrap:  lsusb | grep 0f05   -> 0f05:f235
-sudo ./build/pakon_probe --load-firmware f135.pakfw   # f235 -> f135
-sudo ./build/pakon_probe                              # should now show warm f135 + endpoints
-sudo ./build/pakon_replay --open                      # replay+verify open handshake
+python3 tools/analyze_capture.py /tmp/pakon_scan.pcapng --extract-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe            # warm f135 + endpoints 0x01/0x81/0x86
+sudo ./build/pakon_replay --open    # reaches Idle
 ```
 
-If `--load-firmware` can't open `0f05:f235`, the VM still owns it. If
-`--open` mismatches, paste the trace.
+## NEXT: Phase 5 (reproduce a scan, read the image)
 
-## Other open directions (after the test)
-
-- **Phase 5 image stream:** need an in-VM USBPcap capture of a scan (host usbmon
-  can't see image bytes); decode `0x86` format + scan-start commands.
-- **Decode more protocol:** mine the 2218 command exchanges for the full
-  configure/calibrate/scan-start sequence.
+We can now drive the device live, so we don't need the image bytes from the
+capture — once we replay the scan command sequence, we read `0x86` ourselves.
+Plan:
+1. Extract the full EP1 command sequence (2218 exchanges) + `0xA4`/`0xA9` reads
+   from the capture into an ordered "scan script" (like the firmware extractor).
+   Watch for the `03 01 10` status-poll loops (1605×) — replay must wait on
+   them, not blast commands.
+2. Add `pakon_replay --scan`: drive that sequence against hardware (film loaded),
+   reading `0x86` bulk image data into a file (PNM/raw) to eyeball.
+3. Decode the image-stream format (geometry, bit depth, frame boundaries) from
+   what WE read off `0x86`. (In-VM USBPcap remains a cross-check option.)
+Caution (from plan): film is motor-fed whole rolls; design CANCEL carefully.
 
 ## Handy commands
 
