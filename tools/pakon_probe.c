@@ -104,22 +104,25 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
     printf("opened %04x:%04x (warm Pakon, PID family %s; PID is firmware-set, "
            "not the physical model)\n", vid, pid, pakon_pid_family(pid));
 
-    pakon_endpoint eps[8];
+    pakon_endpoint eps[16];
     size_t n = 0;
-    r = pakon_usb_endpoints(dev, eps, 8, &n);
+    r = pakon_usb_endpoints(dev, eps, 16, &n);
     if (r != PAKON_OK) {
         fprintf(stderr, "endpoint query failed: %s\n", pakon_result_str(r));
         pakon_usb_close(dev);
         return 1;
     }
 
-    printf("%zu endpoint(s):\n", n);
-    for (size_t i = 0; i < n && i < 8; i++) {
-        printf("  ep 0x%02x  %-11s  %s  max %u\n",
-               eps[i].address, xfer_type(eps[i].attributes),
+    printf("%zu endpoint(s) across all interfaces/altsettings:\n", n);
+    printf("  if alt  ep    dir  type         max\n");
+    for (size_t i = 0; i < n && i < 16; i++) {
+        printf("  %2u %3u  0x%02x  %s  %-11s  %u\n",
+               eps[i].interface, eps[i].altsetting, eps[i].address,
                (eps[i].address & 0x80) ? "IN " : "OUT",
-               eps[i].max_packet);
+               xfer_type(eps[i].attributes), eps[i].max_packet);
     }
+    if (n == 0)
+        printf("  (none — run with PAKON_DEBUG=3 to see the interface tree)\n");
     pakon_usb_close(dev);
     return 0;
 }

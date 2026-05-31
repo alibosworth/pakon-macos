@@ -68,11 +68,16 @@ typedef struct pakon_ctx pakon_ctx;
 /* Opaque open-device handle (wraps libusb_device_handle + endpoint map). */
 typedef struct pakon_dev pakon_dev;
 
-/* Describes one of the warm device's endpoints, for the Phase 1 dump. */
+/* Describes one of the warm device's endpoints, for the Phase 1 dump. The
+ * interface/altsetting context matters: FX2 devices often expose their bulk
+ * endpoints only in a non-default alternate setting, so Phase 2 must know which
+ * interface+alt to select before the endpoints are usable. */
 typedef struct {
     uint8_t address;        /* bEndpointAddress (dir bit included) */
     uint8_t attributes;     /* bmAttributes (transfer type) */
     uint16_t max_packet;    /* wMaxPacketSize */
+    uint8_t interface;      /* bInterfaceNumber it lives on */
+    uint8_t altsetting;     /* bAlternateSetting it lives in */
 } pakon_endpoint;
 
 /* ---- context lifecycle ---- */

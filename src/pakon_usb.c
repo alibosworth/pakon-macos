@@ -26,7 +26,7 @@
 #define FX2_RAM_MAX     0x4000    /* internal RAM extent for the data path */
 #define FX2_TIMEOUT_MS  2000
 
-#define MAX_ENDPOINTS   8
+#define MAX_ENDPOINTS   16
 
 struct pakon_ctx {
     libusb_context *usb;
@@ -169,7 +169,9 @@ pakon_result pakon_usb_list(pakon_ctx *ctx, pakon_usb_devinfo *arr,
     return PAKON_OK;
 }
 
-/* Collect the endpoint map of the open device's first interface/altsetting. */
+/* Collect every endpoint across all interfaces/altsettings of the active
+ * config. FX2 devices commonly leave altsetting 0 empty and expose the bulk
+ * endpoints in a higher alternate setting, so we must scan all of them. */
 static pakon_result cache_endpoints(pakon_dev *dev, libusb_device *udev)
 {
     struct libusb_config_descriptor *cfg = NULL;
@@ -181,16 +183,28 @@ static pakon_result cache_endpoints(pakon_dev *dev, libusb_device *udev)
     }
 
     dev->n_endpoints = 0;
-    if (cfg->bNumInterfaces > 0 && cfg->interface[0].num_altsetting > 0) {
-        const struct libusb_interface_descriptor *id =
-            &cfg->interface[0].altsetting[0];
-        for (uint8_t e = 0; e < id->bNumEndpoints &&
-             dev->n_endpoints < MAX_ENDPOINTS; e++) {
-            const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
-            dev->endpoints[dev->n_endpoints].address    = ep->bEndpointAddress;
-            dev->endpoints[dev->n_endpoints].attributes  = ep->bmAttributes;
-            dev->endpoints[dev->n_endpoints].max_packet  = ep->wMaxPacketSize;
-            dev->n_endpoints++;
+    pakon_logf(PAKON_LOG_DEBUG, "active config has %u interface(s)",
+               cfg->bNumInterfaces);
+
+    for (uint8_t ifc = 0; ifc < cfg->bNumInterfaces; ifc++) {
+        const struct libusb_interface *iface = &cfg->interface[ifc];
+        for (int alt = 0; alt < iface->num_altsetting; alt++) {
+            const struct libusb_interface_descriptor *id =
+                &iface->altsetting[alt];
+            pakon_logf(PAKON_LOG_DEBUG,
+                       "  interface %u altsetting %u: %u endpoint(s)",
+                       id->bInterfaceNumber, id->bAlternateSetting,
+                       id->bNumEndpoints);
+            for (uint8_t e = 0; e < id->bNumEndpoints &&
+                 dev->n_endpoints < MAX_ENDPOINTS; e++) {
+                const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
+                pakon_endpoint *out = &dev->endpoints[dev->n_endpoints++];
+                out->address    = ep->bEndpointAddress;
+                out->attributes = ep->bmAttributes;
+                out->max_packet = ep->wMaxPacketSize;
+                out->interface  = id->bInterfaceNumber;
+                out->altsetting = id->bAlternateSetting;
+            }
         }
     }
     libusb_free_config_descriptor(cfg);
