@@ -7,20 +7,21 @@ guide. This file is the short "where we left off" snapshot.
 _Last updated: 2026-05-31._
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
-code and pulled **239,984,640 image bytes** (4-frame B&W strip, 11719 reads, 2
-late errors). **Image format DECODED** (via tools/raw2pnm.py):
-- row stride 16000 bytes (autocorr peak + 2x harmonic), **16-bit little-endian**,
-- **single-channel grayscale** (this was a B&W scan; 8000 samples/line, which is
-  why it doesn't divide by 3 — no color planes),
-- **8000 px wide** (across film) × ~14999 lines (along film) ⇒ ~3750 lines/frame,
-- the ribbon is rotated 90° → render upright with `--transpose`.
-- View a frame:
-  `raw2pnm.py scan.raw --mode gray16le --width 8000 --offset 40000000 --lines 3750 --transpose -o frame.pnm`
+code and pulled **239,984,640 image bytes** (4-frame COLOR strip, scan res
+3000x2000/frame, 11719 reads, 2 late errors). **Image format (decoding):**
+- row stride **16000 bytes** (autocorr peak + 2x harmonic), **16-bit LE**,
+- **COLOR, planar**: 8000 samples/line doesn't divide by 3, so each line is
+  concatenated planes (hypothesis: R|G|B ≈ 2666 each + pad). Confirm by whether
+  a gray render @ width 8000 shows the scene 3× side-by-side.
+- ribbon rotated 90°, and pixels are non-square (across-sensor oversampled vs
+  motor step) — Pakon's own output is 3000x2000/frame, so resample to that.
+- ~14999 lines total ⇒ ~3750 lines/frame.
+- `tools/raw2pnm.py` now supports `--planar N` (split line into N planes → RGB),
+  `--rotate {90,180,270}`, `--resize WxH`. Try:
+  `raw2pnm.py scan.raw --mode gray16le --width 8000 --offset 40000000 --lines 3750 --planar 3 --rotate 90 --resize 3000x2000 -o frame.pnm`
 
-TODO: pixel aspect (cross-sensor vs motor-step res may be non-square — confirm
-vs Pakon's reported dimensions), frame-boundary detection (gaps between frames),
-and wrap to TIFF/PNG. Also still need a COLOR scan capture to decode the color
-(planar?) layout. Then Phase 6 (SANE backend).
+TODO: confirm planar layout + plane width/padding + channel order (RGB vs BGR);
+frame-boundary detection (gaps); wrap to TIFF/PNG. Then Phase 6 (SANE backend).
 
 ## Phase status
 

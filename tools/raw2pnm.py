@@ -44,23 +44,44 @@ def render(args):
     maxval = 65535 if is16 else 255
     magic = "P6" if is_rgb else "P5"
 
-    if args.transpose:
-        # Rotate 90°: the scan's line axis is across the film, the line-count
-        # axis is along it, so the photo comes out sideways. Needs numpy.
+    if args.transpose or args.rotate or args.resize or args.planar:
+        # The scan's line axis is across the film and the line-count axis is
+        # along it (and the across axis is oversampled), so a frame comes out
+        # sideways and stretched. Color is planar: each line is N concatenated
+        # equal planes (R,G,B). Rotate/resize/deplanarize to view correctly.
         try:
             import numpy as np
         except ImportError:
-            sys.exit("--transpose needs numpy; otherwise rotate in your viewer")
+            sys.exit("--transpose/--rotate/--resize/--planar need numpy")
         if is_rgb:
-            sys.exit("--transpose currently supports the gray modes only")
+            sys.exit("these options take a gray mode input; use --planar for color")
         dt = (("<u2" if little else ">u2") if is16 else "u1")
-        a = np.frombuffer(data, dtype=dt).reshape(rows, args.width)
-        a = a.T.copy()                      # (width, rows)
-        oh, ow = a.shape
+        a = np.frombuffer(data, dtype=dt).reshape(rows, args.width)  # (rows, W)
+
+        if args.planar:                    # split a line into N planes -> RGB
+            pw = args.width // args.planar
+            planes = [a[:, i * pw:(i + 1) * pw] for i in range(args.planar)]
+            a = np.stack(planes[:3], axis=-1)            # (rows, pw, 3)
+
+        if args.transpose:
+            a = np.swapaxes(a, 0, 1)
+        if args.rotate:
+            a = np.rot90(a, k=(args.rotate // 90) % 4)
+        if args.resize:
+            tw, th = (int(v) for v in args.resize.lower().split("x"))
+            yi = np.arange(th) * a.shape[0] // th
+            xi = np.arange(tw) * a.shape[1] // tw
+            a = a[yi][:, xi]                              # nearest-neighbour
+
+        color = (a.ndim == 3)
+        a = np.ascontiguousarray(a)
+        oh, ow = a.shape[0], a.shape[1]
         with open(args.out, "wb") as out:
-            out.write(f"{magic}\n{ow} {oh}\n{maxval}\n".encode())
+            out.write(f"{'P6' if color else 'P5'}\n{ow} {oh}\n{maxval}\n".encode())
             out.write(a.astype(">u2").tobytes() if is16 else a.tobytes())
-        print(f"wrote {args.out}: {ow}x{oh} {args.mode} (transposed)")
+        print(f"wrote {args.out}: {ow}x{oh} "
+              f"{'rgb' if color else 'gray'}{'16' if is16 else '8'}"
+              f"{' planar%d' % args.planar if args.planar else ''}")
         return
 
     with open(args.out, "wb") as out:
@@ -139,7 +160,14 @@ def main():
                     help="rows to render (0 = all; default 1200)")
     ap.add_argument("--offset", type=int, default=0, help="skip leading bytes")
     ap.add_argument("--transpose", action="store_true",
-                    help="rotate 90° (scan ribbon comes out sideways); gray modes")
+                    help="transpose (90° + mirror); gray modes")
+    ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                    help="rotate the image by this many degrees (gray modes)")
+    ap.add_argument("--resize", metavar="WxH",
+                    help="resample to WxH (nearest), e.g. 3000x2000 (gray modes)")
+    ap.add_argument("--planar", type=int, metavar="N",
+                    help="treat each --width line as N concatenated planes and "
+                         "build an RGB image (N=3 for planar R,G,B color)")
     ap.add_argument("-o", "--out", default="scan.pnm")
     ap.add_argument("--guess-stride", action="store_true")
     ap.add_argument("--sample", type=int, default=8 << 20,
