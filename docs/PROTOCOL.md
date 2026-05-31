@@ -210,7 +210,28 @@ film runs out, then 61× at the final read. PICL `03 01 20` showed the same
 not a counter). **There is no distinct "done" status** — `0x80` is *busy*, not
 *finished* — which is why end-of-roll white (below) is the done-signal.
 
-### Poll-driven scan state machine — `pakon_replay --scan-sm`
+### Auto-stop scanning — `pakon_replay --scan FILE --autostop` (the working path)
+
+The pure poll-driven SM (`--scan-sm`, below) stalls: the main scan needs periodic
+**housekeeping** commands interspersed between reads (`02 05 20 02 06 00 20`
+write + `01 03 20 1e 90` read, plus per-frame `02 06 ..` exposure writes) to keep
+the readout streaming. Their cadence is **device-triggered and irregular**
+(~600–4400 reads apart), so it can't be synthesised blind. But all rolls use the
+**same method, differing only in length** — a 4-frame and a 24-frame capture have
+the identical command vocabulary, just more of it.
+
+So `--autostop` replays a captured script **verbatim** (correct streaming +
+housekeeping + teardown) while watching the `0x86` stream, and **stops at
+end-of-roll white** — the moment the film is through — then replays the teardown
+tail to reset the engines. A shorter film just trips the white detector earlier
+and stops. **Strategy: capture once at the maximum length (a 36-exposure roll)
+and use that as the canonical script;** any shorter film auto-stops before the
+script runs out. This is the length-independent auto-stop the varying-film-length
+use case needs, built only from proven behaviour (verbatim streaming + white
+detection, both validated on hardware). End-of-roll white tunables shared with
+the SM (`SM_TRAIL_WHITE` etc., above `do_scan`).
+
+### Poll-driven scan state machine — `pakon_replay --scan-sm` (shelved — stalls)
 
 Verbatim `--scan` is locked to the captured image-read count, so it only fits a
 roll the same length as the reference. `--scan-sm` replays the deterministic

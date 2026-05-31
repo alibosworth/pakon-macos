@@ -261,6 +261,32 @@ static int hexbytes(const char *s, uint8_t *out, size_t max)
     return hi < 0 ? (int)n : -1;
 }
 
+/* ---- End-of-roll detection (shared by --scan --autostop and --scan-sm) ----
+ * The scan ends with the open gate shining through no film: samples near the
+ * 16-bit max (~48900). Film -- even clear base, leader, or inter-frame gaps
+ * (orange C-41 base) -- is far darker, so a chunk that is almost all "white"
+ * means no film. Latch film_seen on the first non-white chunk, then stop after
+ * a sustained run of trailing white. See docs/PROTOCOL.md photometry. */
+#define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
+#define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
+#define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
+#define SM_MAX_EMPTY      2u      /* empty windows (~5s each) AFTER film => end of roll */
+#define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
+                                   * operator to feed the film (~5s each, ~2 min) */
+
+/* Is a 0x86 chunk dominated by open-gate white (no film)? */
+static int sm_chunk_is_white(const uint8_t *buf, size_t got)
+{
+    size_t samples = got / 2;
+    if (samples == 0) return 0;
+    size_t white = 0;
+    for (size_t i = 0; i + 1 < got; i += 2) {
+        unsigned v = (unsigned)buf[i] | ((unsigned)buf[i + 1] << 8);
+        if (v > SM_WHITE_THRESH) white++;
+    }
+    return white * 100u >= samples * SM_WHITE_FRAC_PCT;
+}
+
 /* After the script ends, keep polling + draining 0x86 until it goes quiet.
  * Used for scans longer than the captured reference (e.g. whole rolls). */
 static void drain_image(pakon_dev *dev, FILE *img,
@@ -301,8 +327,11 @@ static int trace_interesting(const uint8_t *raw, int n)
     return 0;
 }
 
+static long sm_replay_teardown(pakon_dev *dev, const char *script, unsigned timeout,
+                               unsigned long *ncmd, unsigned long *errs);
+
 static int do_scan(const char *script, const char *image_path, unsigned timeout,
-                   int drain, int trace_status)
+                   int drain, int trace_status, int autostop)
 {
     FILE *fp = fopen(script, "r");
     if (!fp) { fprintf(stderr, "cannot open scan script '%s'\n", script); return 1; }
@@ -333,6 +362,16 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
     unsigned long ncmd = 0, nimg = 0, errs = 0;
     unsigned long long img_bytes = 0;
     int rc = 0;
+    /* --autostop: watch the image stream and stop when the film actually ends,
+     * regardless of the captured length. Replay a full-roll capture and a
+     * shorter film just stops earlier. */
+    int film_seen = 0, stop_early = 0;
+    unsigned trail_white = 0;
+
+    if (autostop)
+        printf("  [autostop] will stop at end-of-roll white "
+               "(%u trailing-white chunks after film); feed film promptly on green\n",
+               SM_TRAIL_WHITE);
 
     while (fgets(line, sizeof(line), fp)) {
         char *p = line;
@@ -373,6 +412,22 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
             if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) errs++;
             if (++nimg % 1000 == 0)
                 printf("  ... %lu image reads, %llu bytes\n", nimg, img_bytes);
+            if (autostop && got) {
+                if (sm_chunk_is_white(buf, got)) {
+                    if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
+                        printf("  [autostop] end-of-roll white (%u chunks) after "
+                               "%lu reads / %llu bytes -> stopping early\n",
+                               trail_white, nimg, img_bytes);
+                        stop_early = 1;
+                        break;
+                    }
+                } else {
+                    if (!film_seen)
+                        printf("  [autostop] film detected at read %lu\n", nimg);
+                    film_seen = 1;
+                    trail_white = 0;
+                }
+            }
         } else if (*p == 'C') {                           /* control xfer */
             unsigned brt, breq, wval, widx, wlen; int consumed = 0;
             if (sscanf(p + 1, "%x %x %x %x %x%n", &brt,&breq,&wval,&widx,&wlen,&consumed) != 5) {
@@ -387,7 +442,14 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
         }
     }
 
-    if (!rc && drain) {
+    if (!rc && stop_early) {
+        /* We broke out mid-script at end-of-roll, so the script's own teardown
+         * tail was skipped. Replay it now to stop the engines and reset to idle
+         * (same sequence the driver runs at its own end-of-roll). */
+        printf("  [autostop] replaying captured teardown (stop + engine reset)...\n");
+        long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
+        printf("  [autostop] teardown: %ld commands replayed\n", td);
+    } else if (!rc && drain) {
         printf("  [drain] script exhausted, draining 0x86 until scanner signals done...\n");
         drain_image(dev, img, &ncmd, &nimg, &img_bytes, &errs, timeout);
     }
@@ -424,28 +486,8 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
  * 04 03 24 00 a0 (confirmed). Everything up to the first image read after it is
  * replayed; from there we take over. */
 
-/* Tunables (logged at start; see docs/PROTOCOL.md photometry + status notes). */
-#define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
-#define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
-#define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
-#define SM_MAX_EMPTY      2u      /* empty windows (~5s each) AFTER film => end of roll */
-#define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
-                                   * operator to feed the film (~5s each, ~2 min) */
-
+/* (white-detection constants + sm_chunk_is_white live above do_scan, shared.) */
 static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
-
-/* Is a freshly read 0x86 chunk dominated by open-gate white (no film)? */
-static int sm_chunk_is_white(const uint8_t *buf, size_t got)
-{
-    size_t samples = got / 2;
-    if (samples == 0) return 0;
-    size_t white = 0;
-    for (size_t i = 0; i + 1 < got; i += 2) {
-        unsigned v = (unsigned)buf[i] | ((unsigned)buf[i + 1] << 8);
-        if (v > SM_WHITE_THRESH) white++;
-    }
-    return white * 100u >= samples * SM_WHITE_FRAC_PCT;
-}
 
 /* Build + send a frame whose wire bytes are raw[0..n) (raw[0]=type,[1]=count,
  * [2..]=data). Reads (and discards) the reply on EP1 IN. */
@@ -749,7 +791,7 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s FILE.pakscan [--steps N] [--limit SEC] advance film\n"
-        "       %s --scan FILE [--image OUT] [--drain]   verbatim scan replay\n"
+        "       %s --scan FILE [--image OUT] [--drain] [--autostop]  scan replay\n"
         "       %s --scan-sm FILE [--image OUT] [--max-mb N]  poll-driven scan\n"
         "       %s --open                                verify open handshake\n"
         "\n"
@@ -761,6 +803,9 @@ static void usage(const char *argv0)
         "                  stop on end-of-roll white (any roll length)\n"
         "  --image OUT   raw image output for --scan/--scan-sm (default pakon_scan.raw)\n"
         "  --drain       after the scan script ends, keep reading 0x86 until done\n"
+        "  --autostop    with --scan: stop at end-of-roll white (film fully\n"
+        "                scanned) and replay teardown -- replay a max-length\n"
+        "                capture and any shorter film just stops earlier\n"
         "  --trace-status  with --scan: log live poll/kick replies + status, with\n"
         "                  the current image-read index (to learn the cadence)\n"
         "  --max-mb N    --scan-sm safety cap on image bytes (default 512, 0=off)\n"
@@ -772,7 +817,7 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
-    int want_open = 0, drain = 0, trace_status = 0;
+    int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -800,6 +845,8 @@ int main(int argc, char **argv)
             drain = 1;
         } else if (!strcmp(argv[i], "--trace-status")) {
             trace_status = 1;
+        } else if (!strcmp(argv[i], "--autostop")) {
+            autostop = 1;
         } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
             timeout = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--limit") && i + 1 < argc) {
@@ -825,6 +872,6 @@ int main(int argc, char **argv)
     if (scan_sm_file)
         return do_scan_sm(scan_sm_file, image_path, timeout, max_mb);
     if (scan_file)
-        return do_scan(scan_file, image_path, timeout, drain, trace_status);
+        return do_scan(scan_file, image_path, timeout, drain, trace_status, autostop);
     return do_open(timeout);
 }
