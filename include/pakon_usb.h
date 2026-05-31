@@ -24,9 +24,11 @@ extern "C" {
 #endif
 
 /*
- * Warm (post-firmware) Pakon identity. The VID is constant; the PID encodes
- * the model number (confirmed on real hardware: an F-235 enumerates as
- * 0F05:F235). All members of the F-x35 family are treated as warm.
+ * Warm (post-firmware) Pakon identity. The VID is constant; the PID is set by
+ * whatever firmware the FX2 booted and is NOT a reliable model indicator — a
+ * physical F-135 unit has been observed enumerating as 0F05:F235. We therefore
+ * treat the whole F-x35 PID family as "warm"; the real model is identified at
+ * the protocol layer, not from the USB PID.
  */
 #define PAKON_WARM_VID        0x0F05
 #define PAKON_WARM_PID_F135   0xF135   /* Pakon F-135 */

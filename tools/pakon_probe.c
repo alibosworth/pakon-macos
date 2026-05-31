@@ -43,15 +43,17 @@ static const char *device_hint(unsigned vid, unsigned pid)
     return "";
 }
 
-/* Map a warm PID to its model name for friendlier output. */
-static const char *pakon_model(uint16_t pid)
+/* Label a warm PID. NOTE: the PID is set by the booted firmware, not the
+ * physical model — an F-135 has been seen reporting F235 — so this is only a
+ * PID-family hint, not the real model. */
+static const char *pakon_pid_family(uint16_t pid)
 {
     switch (pid) {
-    case PAKON_WARM_PID_F135: return "F-135";
-    case PAKON_WARM_PID_F235: return "F-235";
-    case PAKON_WARM_PID_F335: return "F-335";
+    case PAKON_WARM_PID_F135: return "Fx35/F135";
+    case PAKON_WARM_PID_F235: return "Fx35/F235";
+    case PAKON_WARM_PID_F335: return "Fx35/F335";
     }
-    return "unknown model";
+    return "unknown";
 }
 
 static int do_list(pakon_ctx *ctx)
@@ -99,7 +101,8 @@ static int dump_warm_endpoints(pakon_ctx *ctx)
 
     uint16_t vid = 0, pid = 0;
     pakon_usb_dev_ids(dev, &vid, &pid);
-    printf("opened %04x:%04x (Pakon %s)\n", vid, pid, pakon_model(pid));
+    printf("opened %04x:%04x (warm Pakon, PID family %s; PID is firmware-set, "
+           "not the physical model)\n", vid, pid, pakon_pid_family(pid));
 
     pakon_endpoint eps[8];
     size_t n = 0;

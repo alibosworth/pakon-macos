@@ -6,10 +6,16 @@ marked **TBD** or **inferred** — do not treat inferred items as ground truth.
 
 ## Identities
 
-- **Warm (post-firmware):** `0F05:Fxxx` where the PID encodes the model —
-  `F135` (F-135), `F235` (F-235), `F335` (F-335). Class `0xff` (vendor-specific).
-  **Verified on hardware:** an F-235 enumerates as `0F05:F235`. *(documented +
-  observed)*
+- **Warm (post-firmware):** `0F05:Fx35`, class `0xff` (vendor-specific), 3
+  endpoints. The PID (`F135`/`F235`/`F335`) is set by the firmware the FX2
+  booted and is **not** a reliable model indicator: a physical **F-135** unit
+  was observed enumerating as `0F05:F235`. Treat any `0F05:Fx35` as warm;
+  identify the actual model via the protocol layer (not the USB PID).
+- **Note on boot state:** at least one unit comes up *already warm* on
+  power-on (no host firmware download performed). That means either the board
+  auto-loads firmware from an onboard EEPROM, or a udev/fxload rule on the host
+  loaded it on plug. If firmware auto-loads, the host-side FX2 download
+  (Phase 1 task 2) is a fallback, not on the critical path for that unit.
 - **Cold (FX2 bootloader):** **TBD** — confirm via `lsusb` (Linux) or
   `pakon_probe --list` / `system_profiler SPUSBDataType` (macOS) on a freshly
   powered scanner before any driver loads (Phase 1, STOP POINT A). Not guessed:
