@@ -46,10 +46,31 @@ algorithm, (3) driven C backend.
   0x82 = CCD timing: CcdExposure_R/G/B (regs 1-3, 12-bit), Height (reg 6),
   control bitmask (reg 0). Address caveat: TLA uses 0xF0 (CCD1) where our F-135
   wire uses 0x20 (PICL) — same bank/reg semantics, use F-135 addrs.
-- **NEXT (milestone 2):** the CALIBRATE feedback algorithm (`EventScanCalibrate`)
-  — how open-gate CCD readings drive gain/offset/exposure to target white. The
-  make-or-break piece; needs decompile + on-hardware iteration. Plus LampLevel +
-  motor/geometry registers.
+### >>> NEXT TASK (resume here after a context clear) <<<
+
+**Milestone 2 of the capture-free backend: reverse the CALIBRATE feedback
+algorithm.** How the OEM reads the open-gate CCD output and drives
+gain/offset/exposure to a target white each session (the variance fix). Then
+LampLevel (separate LAMP subsystem address) and motor/geometry registers on PICM
+(0x24). Deliverable: extend `docs/REGISTERS.md` + a calibration write-up, working
+toward a driven C state machine (OPEN → param read → CALIBRATE → CONFIGURE → SCAN).
+
+Environment note: this work mines the **Ghidra dumps `re/out/TLA.c` / `TLC.c`**,
+which are **git-ignored and exist only on the Mac** (regenerate via
+`re/scripts/DumpDecompiled.java`, see the ghidra-re-setup memory). Do it on the Mac.
+
+Concrete entry points in `re/out/TLA.c`:
+- `EventScanCalibrate` / `m_hEventScanCalibrate` — the calibrate thread/event
+  (refs near lines 43952, 46182, 48060, 48242, 48387). Find the thread proc it
+  signals and trace the measure→adjust loop.
+- Register setters already mapped (milestone 1): gain `FUN_1002f9c0`, offset
+  `FUN_1002fad0`, exposure `FUN_10032680`, integration/height `FUN_10032d20`,
+  WriteRegister `FUN_1000e510`. Milestone 2 = find who calls these with *computed*
+  (not config-loaded) values during calibration, and the target-white logic.
+- Look for the **open-gate** path: struct `CcdExposureOpenGate_*` @+0x68/6c/70,
+  `DetectWhite_G`, `FullLightCorrections`, `WaitForLamp_*` — the OEM calibrates
+  with the gate open (no film) using separate open-gate exposures.
+- Register map + frame format + address caveat (0xF0 vs F-135 0x20): `docs/REGISTERS.md`.
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
