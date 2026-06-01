@@ -46,31 +46,55 @@ algorithm, (3) driven C backend.
   0x82 = CCD timing: CcdExposure_R/G/B (regs 1-3, 12-bit), Height (reg 6),
   control bitmask (reg 0). Address caveat: TLA uses 0xF0 (CCD1) where our F-135
   wire uses 0x20 (PICL) — same bank/reg semantics, use F-135 addrs.
+- **Milestone 2 DONE — CALIBRATE feedback algorithm reversed** (`docs/REGISTERS.md`
+  → "The CALIBRATE feedback algorithm"). Core loop is `TLA.c FUN_10022f80`, three
+  sequential phases with **no film in the gate**:
+  1. **Dark offset** (gate opaque, gain 0): per-channel mean → **target 300 ADU
+     ±32**, proportional step `(300−mean)/38.4`, ≤8 iters, writes bank 0x84.5/6/7.
+  2. **Gain** (visible gate): per-channel peak → **target 64000 ADU** `[64000,64512]`,
+     ratio control `gain = round(factor·64000/peak)` with `factor = 1/(1−gain·k)`,
+     ≤4 iters, writes bank 0x84.2/3/4.
+  3. **Exposure** by 6-point sweep + per-channel OLS fit → bank 0x82.1/2/3, clamp
+     `[0xd,0xfff]`; up to 2 outer passes; thin coverage trims **LampLevel** (lamp
+     subsystem **TLA addr 0xf6 reg 0x80**, 16-bit, window ≈11500–14900).
+  Measurement primitive `FUN_10021bd0` (accumulate N CCD lines) + reducers
+  `FUN_10021b00` (mean) / `FUN_100214d0` (peak); convergence `FUN_100215a0`. Also
+  decoded the **filter-wheel/gate** setter `FUN_10033250` (TLA addr 0xf4, position
+  codes 0xe3/0xe4 visible, 0xe5 opaque). Open constants (`_DAT_1006f268`≈64000.0,
+  gain `k`≈1/63) and the **lamp F-135 wire address** to confirm on hardware.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 2 of the capture-free backend: reverse the CALIBRATE feedback
-algorithm.** How the OEM reads the open-gate CCD output and drives
-gain/offset/exposure to a target white each session (the variance fix). Then
-LampLevel (separate LAMP subsystem address) and motor/geometry registers on PICM
-(0x24). Deliverable: extend `docs/REGISTERS.md` + a calibration write-up, working
-toward a driven C state machine (OPEN → param read → CALIBRATE → CONFIGURE → SCAN).
+**Milestone 3 of the capture-free backend: build the driven C CALIBRATE state
+machine.** Implement the algorithm now documented in `docs/REGISTERS.md` ("The
+CALIBRATE feedback algorithm" + "What this means for the driven C backend") as a
+real state in our backend: OPEN → param read → **CALIBRATE (measure+adjust)** →
+CONFIGURE (write computed gain/offset/exposure) → SCAN. We already own the CCD
+line read (Phase 5 `0x86` stream), the register-write frame, and the algorithm.
+
+Sequence to implement (all gate-no-film):
+1. Gate→opaque, gain 0; loop ≤8: write offset 0x84.5/6/7, grab 32 lines, mean→300±32,
+   step `(300−mean)/38.4`.
+2. Gate→visible, nominal exposure; loop ≤4: write gain 0x84.2/3/4, grab 32 lines
+   averaged, peak→64000, `gain=round(factor·64000/peak)`, `factor=1/(1−gain·k)`.
+3. 6-pt exposure sweep + per-channel OLS → write exposure 0x82.1/2/3, clamp [0xd,0xfff].
+4. Thin coverage → trim lamp (0xf6.0x80), repeat ≤2.
+
+Blocking unknowns to resolve FIRST (from a fresh scan capture — Linux box):
+- **Lamp F-135 wire address** (TLA uses 0xf6; 0xf0→0x20, 0xf4→0x24, 0xf6→?). Find
+  the CONFIGURE-phase write carrying an ~11500–14900 value.
+- **Filter-wheel/gate** F-135 wire codes (TLA 0xf4 / 0xe3..0xe5).
+- The exact `.data` target constants — verify by calibrating to known targets and
+  reading back on hardware.
 
 Environment note: this work mines the **Ghidra dumps `re/out/TLA.c` / `TLC.c`**,
 which are **git-ignored and exist only on the Mac** (regenerate via
 `re/scripts/DumpDecompiled.java`, see the ghidra-re-setup memory). Do it on the Mac.
 
-Concrete entry points in `re/out/TLA.c`:
-- `EventScanCalibrate` / `m_hEventScanCalibrate` — the calibrate thread/event
-  (refs near lines 43952, 46182, 48060, 48242, 48387). Find the thread proc it
-  signals and trace the measure→adjust loop.
-- Register setters already mapped (milestone 1): gain `FUN_1002f9c0`, offset
-  `FUN_1002fad0`, exposure `FUN_10032680`, integration/height `FUN_10032d20`,
-  WriteRegister `FUN_1000e510`. Milestone 2 = find who calls these with *computed*
-  (not config-loaded) values during calibration, and the target-white logic.
-- Look for the **open-gate** path: struct `CcdExposureOpenGate_*` @+0x68/6c/70,
-  `DetectWhite_G`, `FullLightCorrections`, `WaitForLamp_*` — the OEM calibrates
-  with the gate open (no film) using separate open-gate exposures.
-- Register map + frame format + address caveat (0xF0 vs F-135 0x20): `docs/REGISTERS.md`.
+Milestone-2 anchors in `re/out/TLA.c` (for re-verification): core loop
+`FUN_10022f80` (24739–25373); orchestrator `FUN_10033dd0`; coordinator
+`FUN_10026990`; measure `FUN_10021bd0`; reducers `FUN_10021b00`/`FUN_100214d0`;
+convergence `FUN_100215a0` (23728); lamp `FUN_10033c70` (addr 0xf6); gate
+`FUN_10033250` (addr 0xf4). Register map + address caveat: `docs/REGISTERS.md`.
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
