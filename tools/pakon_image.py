@@ -76,15 +76,19 @@ def _vlead(ch, ref, rng=40, rowstep=1, colstep=3):
     return best[0]
 
 
-def measure_leads(chans, c0, c1):
+def measure_leads(chans, c0, c1, perm=None):
     """Measure the trilinear G/B line leads (in scan lines) relative to R, on a
-    single column zone [c0:c1] of the full-width deinterleaved channels."""
+    single column zone [c0:c1] of the full-width deinterleaved channels.
+
+    `perm` is an optional dict remapping channel names, e.g. {"r":"g","g":"b","b":"r"}
+    for zones whose tap outputs channels in a different order than the global default."""
+    ch = {c: chans[perm[c]] if perm else chans[c] for c in ("r", "g", "b")}
     return {"r": 0,
-            "g": _vlead(chans["g"][:, c0:c1], chans["r"][:, c0:c1]),
-            "b": _vlead(chans["b"][:, c0:c1], chans["r"][:, c0:c1])}
+            "g": _vlead(ch["g"][:, c0:c1], ch["r"][:, c0:c1]),
+            "b": _vlead(ch["b"][:, c0:c1], ch["r"][:, c0:c1])}
 
 
-def register_zones(chans, zones, leads_per_zone, correct_seam=False):
+def register_zones(chans, zones, leads_per_zone, correct_seam=False, zone_perms=None):
     """Co-register the trilinear R/G/B planes and assemble the visible image.
 
     `zones` is a list of (c0, c1) column ranges in *output order*; for a
@@ -92,6 +96,11 @@ def register_zones(chans, zones, leads_per_zone, correct_seam=False):
     sensor wrap seam. Each zone has its own R/G/B leads (the two halves of a
     wrap-split image come from opposite ends of the sensor readout and need
     different leads — using one global lead leaves one half ghosted).
+
+    `zone_perms` is an optional list of per-zone channel permutation dicts (same
+    format as `measure_leads` perm). Used when a zone's tap outputs channels in a
+    different order than the global default (e.g. the second tap in a wrap-split
+    scan).
 
     All zones are row-cropped against a *common* lead span (global max/min over
     every zone) so they stay aligned to the same scan lines, then concatenated
@@ -101,8 +110,10 @@ def register_zones(chans, zones, leads_per_zone, correct_seam=False):
     n = chans["r"].shape[0]
     L = n - (gm - glo)
     parts = []
-    for (c0, c1), leads in zip(zones, leads_per_zone):
-        out = {c: chans[c][gm - leads[c]: gm - leads[c] + L, c0:c1] for c in chans}
+    for i, ((c0, c1), leads) in enumerate(zip(zones, leads_per_zone)):
+        perm = zone_perms[i] if zone_perms else None
+        src = {c: chans[perm[c]] if perm else chans[c] for c in ("r", "g", "b")}
+        out = {c: src[c][gm - leads[c]: gm - leads[c] + L, c0:c1] for c in src}
         parts.append(np.stack([out["r"], out["g"], out["b"]], axis=-1))
     if correct_seam:
         parts = dual_tap_correct(parts)
@@ -352,18 +363,23 @@ def main():
         zones = [z for z in [(ir1 + 1, width), (0, ir0)] if z[1] > z[0]]
         print(f"IR band: cols {ir0}-{ir1} (Digital ICE); visible zones "
               f"{zones}")
+        # Zone1 (before-IR) is read by the other CCD tap which outputs channels
+        # in a different order: pos0→G, pos1→B, pos2→R vs zone0's pos0→B, pos1→R,
+        # pos2→G. Confirmed by permutation sweep on fullroll.raw (seam_RGB winner).
+        zone_perms = [None, {"r": "g", "g": "b", "b": "r"}] if len(zones) == 2 else [None]
     else:
         zones = [(0, width)]
+        zone_perms = [None]
 
     if args.register:
         if args.reg_leads:
             g, b = (int(v) for v in args.reg_leads.split(","))
             leads_per_zone = [{"r": 0, "g": g, "b": b} for _ in zones]
         else:
-            # Each visible zone gets its own leads — the wrap-split halves come
-            # from opposite ends of the sensor readout and need different
-            # offsets; one global lead leaves one half ghosted.
-            leads_per_zone = [measure_leads(chans, c0, c1) for c0, c1 in zones]
+            # Each visible zone gets its own leads, measured with the correct
+            # per-zone channel mapping so the cross-correlation sees real RGB.
+            leads_per_zone = [measure_leads(chans, c0, c1, perm=zone_perms[i])
+                              for i, (c0, c1) in enumerate(zones)]
         for (c0, c1), leads in zip(zones, leads_per_zone):
             print(f"register: zone {c0}-{c1} trilinear leads "
                   f"R=0 G={leads['g']} B={leads['b']}")
@@ -372,7 +388,8 @@ def main():
 
     correct_seam = args.seam_correct and len(zones) == 2
     rgb = register_zones(chans, zones, leads_per_zone,
-                         correct_seam=correct_seam)  # (lines, Wvis, 3)
+                         correct_seam=correct_seam,
+                         zone_perms=zone_perms)  # (lines, Wvis, 3)
     order_idx = {"r": 0, "g": 1, "b": 2}
     perm = [order_idx[c] for c in args.order.lower()]
     if perm != [0, 1, 2]:
