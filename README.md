@@ -13,9 +13,11 @@ Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 > so any machine on the local network can drive the scanner. SANE backend
 > for Linux follows.
 >
-> The decoder handles both the 4-frame and whole-roll scan modes, including
-> Digital ICE IR channel removal, wrap-order de-interleaving, and per-zone
-> trilinear registration.
+> The decoder handles both the 4-frame (HiRes) and whole-roll (LowRes) scan
+> modes, including Digital ICE IR channel removal, wrap-order de-interleaving,
+> per-zone trilinear registration, and per-zone channel-order correction (the
+> two CCD taps interleave RGB differently). Whole-roll **frame splitting** is
+> still being refined toward a fixed-width / fixed-pitch grid model.
 
 ## Architecture
 
@@ -154,9 +156,14 @@ frame count, click Process, and download individual TIFFs or a zip of all frames
 # 4-frame strip
 python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4 --resample-to 3000x2000
 
-# Whole roll (24 frames)
-python3 tools/pakon_image.py fullroll.raw --rotate 90 --frames 24 --resample-to 3000x2000
+# Whole roll — omit --frames to auto-detect the count from the inter-frame gaps
+python3 tools/pakon_image.py fullroll.raw --rotate 90 --resample-to 3000x2000
 ```
+
+> **Note (whole-roll frame splitting is WIP):** auto-detection of frame
+> boundaries on long LowRes rolls is being reworked toward a fixed-width /
+> fixed-pitch grid (35mm frames are a constant width with consistent spacing).
+> Pass `--frames N` to force a known count if auto-detection miscounts.
 
 Writes `frame_1.tif` … `frame_N.tif` as 16-bit RGB TIFFs — registered,
 autocropped raw negatives, orange mask intact. Feed them to Negative Lab Pro,
@@ -173,6 +180,10 @@ The decoder automatically handles:
 - **Per-zone trilinear registration** — the two wrapped halves come from
   opposite CCD tap ends with different R/G/B line offsets and are registered
   independently (eliminates colour ghosting at edges)
+- **Per-zone channel-order correction** — the two CCD taps interleave RGB in
+  different orders (zone0 = B,R,G; zone1 = G,B,R); the decoder remaps zone1 so
+  colours match across the seam (otherwise the wrapped half is mis-coloured and
+  the seam shows a hard tint step)
 - **Aspect ratio correction** — raw pixels are non-square; `--resample-to
   3000x2000` outputs correct 3:2 geometry matching Pakon's native resolution
 
@@ -180,7 +191,7 @@ Key decoder options:
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--frames N` | 1 | split the ribbon into N frames (uses gap detection) |
+| `--frames N` | auto | split into N frames; omit to auto-detect from gap detection |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
 | `--resample-to WxH` | off | resample to exact size (use `3000x2000` for 35mm) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |

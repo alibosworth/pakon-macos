@@ -4,9 +4,10 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-06-01 (C/scanning side DONE & hardware-validated incl. a real
-negative; remaining work is Python decode — C-41 inversion + dual-tap seam. See the
-NEXT TASK section.)_
+_Last updated: 2026-06-01 (LowRes decode session. CONFIRMED: the dual-tap "seam"
+was a zone1 channel-order bug — fixed, colours now even. OPEN: LowRes frame
+splitting needs a fixed-width + fixed-pitch grid model (current per-frame valley
+detection rejected as wrong). Then C-41 inversion. See NEXT TASK.)_
 
 **OEM Windows software reverse-engineered (2026-05-31).** Cloned the original
 Kodak/Pakon software (`pakon-scanning-software/`, git-ignored) and decompiled the
@@ -183,25 +184,50 @@ algorithm, (3) driven C backend.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
 **The C / scanning side is DONE. All remaining work is PYTHON decode in
-`tools/pakon_image.py`.** Two tasks, in priority order:
+`tools/pakon_image.py`.** Status after the 2026-06-01 LowRes session:
 
-1. **C-41 INVERSION (primary — this is the "figure it out" piece).** The scans are
-   raw negatives with the C-41 orange mask, so naive `max-raw` comes out magenta
-   (see the preview PNGs from this session). Implement a proper C-41 inversion:
-   per-channel film-base (Dmin) subtraction in DENSITY (log) space + gray-balance +
-   tone scale → positive. The OEM approach is the Ansel **SCP `modifyDmin=true`**
-   stage — full pipeline in `docs/IMAGING.md`. Sample the film base from the real
-   rebate/clear unexposed border (NOT the bright blank scene). 
-   **Testable now** on the HiRes 4-frame negs: this laptop had `/tmp/neg4*.raw`;
-   originals are on the OTHER Mac (`scan.raw` etc.). Decode deps: a venv with
-   `numpy pillow tifffile` (this session used `/tmp/pakvenv`).
-2. **Dual-tap seam fix (route 1, secondary — needs a LowRes scan to validate).**
-   LowRes/full-roll frames have a magenta/cyan tint seam down the middle (the two
-   CCD taps have different per-channel gain). Fix in `pakon_image.py` with a
-   per-channel gain+offset fit across the seam boundary (measured:
-   `a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets; see the "dual-tap" section
-   below). Only matters for whole-roll (LowRes) scans; no LowRes raw was on disk
-   this session, so validate against a fresh full-roll scan.
+**SOLVED & COMMITTED this session (validated on `/Volumes/Video/fullroll.raw`, the
+1.2 GB whole-roll LowRes scan — keep it, it is the LowRes test fixture):**
+- **Dual-tap "seam" was MOSTLY a CHANNEL-ORDER BUG, not a gain mismatch.** Zone1
+  (the before-IR wrap half, read by the *other* CCD tap) outputs channels in a
+  DIFFERENT interleave order than zone0: **zone0 = pos0→B, pos1→R, pos2→G** (the
+  known global order) but **zone1 = pos0→G, pos1→B, pos2→R**. With the wrong map
+  zone1 showed RGB ghosting + a horizontal shift that made film-edge lines
+  discontinuous across the seam, AND a big colour step. Fixed by per-zone channel
+  permutation (`measure_leads(...,perm=)` / `register_zones(...,zone_perms=)`);
+  zone1 perm = `{"r":"g","g":"b","b":"r"}`. After the fix BOTH zones measure the
+  same trilinear leads (G=-8, B=-16) and the leftover tap gain seam is tiny
+  (`a≈1.0, b≈+400`). User confirmed "colours are even". Commits `8d6f511`
+  (channel order) + `5a37f86` (seam correction, now near-no-op).
+
+**OPEN — FRAME SPLITTING for LowRes whole-roll (the live problem; do NOT
+declare done — get user confirmation):** The current `find_frame_boundaries`
+(per-row detail valleys + prominence ranking, central-50%-columns, auto-count)
+is **the wrong model** per the operator. My attempts this session (median/min
+width, center-crop, pad/trim to a target, pre-roll T//2 exclusion, min-gap merge)
+were rejected as "dumb / nonsensical" and **reverted** (tree is back at `3b5ccb0`).
+THE CORRECT MODEL (operator's steer — implement this next):
+- **35mm frames are a STANDARD FIXED WIDTH** — every frame is the same size; do
+  NOT measure each frame independently and then trim/pad to reconcile.
+- **Inter-frame spacing (pitch) is CONSISTENT** — small variation at most.
+- So: detect the **period/pitch ONCE** (e.g. autocorrelation of the per-row
+  detail signal, or median valley spacing), then lay down a **regular grid** of
+  fixed-width crops at that pitch. All outputs same width (the operator wants
+  **exactly 3000 px** wide), no per-frame trim/pad.
+- **Exclude the bright pre-roll**: the roll starts with a very bright gap = the
+  scanner's open-gate WHITE light before the negative was inserted (not a frame
+  edge). Drop it before/while gridding.
+- Frame COUNT should fall out of (roll length ÷ pitch), not be a required
+  `--frames` arg (operator wants that param gone — auto from the pitch).
+
+**THEN, lower priority:**
+- **C-41 INVERSION** (the "figure it out" piece). Raw negatives have the C-41
+  orange mask; naive `max-raw` comes out magenta. Implement proper inversion:
+  per-channel film-base (Dmin) subtraction in DENSITY (log) space + gray-balance +
+  tone scale → positive. OEM approach = Ansel **SCP `modifyDmin=true`** (full
+  pipeline in `docs/IMAGING.md`). Sample the film base from the real rebate/clear
+  unexposed border, NOT the bright blank scene. Decode venv: `numpy pillow
+  tifffile`.
 
 Reference (this session's findings):
 
@@ -217,10 +243,14 @@ Reference (this session's findings):
   = `scan_fullroll`/`36frames`. Wire tell: PICL `02 05 20 02 06 00 XX` = 0x0200/0x2000
   (HiRes) vs 0x0400/0x4000 (LowRes), a clean 2× readout-rate. Decision: scan LowRes
   for whole rolls and fix the dual-tap seam in `pakon_image.py` (route 1).
-- **Dual-tap seam fix (Python, route 1) — SPEC, needs a LowRes scan to validate.**
-  Per STATUS measurements: per-channel linear fit (gain+offset) across the seam
-  maps left tap → right tap (`a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets). NOT
-  yet testable (no LowRes raw on disk). Implement when a LowRes scan is available.
+- **Dual-tap seam fix (Python, route 1) — DONE 2026-06-01, but the diagnosis
+  changed.** The large per-channel seam coefficients in the old spec
+  (`a[r]=0.866, a[g]=0.637...`) were measuring the wrong thing: zone1 had a
+  **channel-order bug** (pos0→G,pos1→B,pos2→R vs zone0's pos0→B,pos1→R,pos2→G).
+  Once zone1 is read with the correct order, the real tap gain mismatch is tiny
+  (`a≈1.0, b≈+400`). The remaining `dual_tap_correct` seam-column linear fit is a
+  near-no-op safety net. Validated on `/Volumes/Video/fullroll.raw`; user confirmed
+  even colours. (The earlier large-coefficient spec is SUPERSEDED.)
 
 - **ROOT CAUSE of driven-scan incompleteness CONFIRMED (2026-06-01).** A real-film
   driven `--scan-sm` scanned only ~3/4 of the strip then went DARK (flat ~317) for
@@ -462,21 +492,19 @@ ghosted (±24 lines mis-registered, strong red/cyan edge fringing):
 The right zone matches `scan.raw`'s single-zone leads exactly. `pakon_image.py`
 now measures and applies leads per-zone via `measure_leads()` / `register_zones()`.
 
-### ⚠️ OPEN: dual-tap colour calibration mismatch
+### ✅ RESOLVED (2026-06-01): the "dual-tap colour mismatch" was a channel-order bug
 
-The two visible halves have different **per-channel gain** (dual-tap CCD readout,
-each tap has its own analogue calibration):
+The hard tint seam down the middle of every full-roll frame was NOT primarily a
+per-tap gain mismatch — it was a **channel-order difference** between the two taps:
 
-- Left/right seam-adjacent column means differ by per-channel ratio ≈ R:0.60, G:1.33, B:1.15
-- This produces a hard **tint seam** down the middle of every full-roll frame
-  (left half magenta, right half cyan)
-- A per-channel linear fit (gain+offset) across the seam boundary maps left→right
-  correctly at the seam (`a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets)
-- **Not yet implemented** in `pakon_image.py` — needs testing on a scan where the
-  frame boundary is away from the seam position, and ideally on a scan with a
-  uniform subject (sky/wall) for verification
-- **Recommendation:** capture a new scan (single or short roll) and verify the
-  seam fix on clean content before baking into the decoder
+- **zone0** (after-IR half): interleave `pos0→B, pos1→R, pos2→G` (global order)
+- **zone1** (before-IR half): interleave `pos0→G, pos1→B, pos2→R`
+
+The old "per-channel ratio R:0.60, G:1.33, B:1.15" measurement was really seeing
+swapped channels. With the correct per-zone order (`zone_perms` in `register_zones`),
+both halves register to the same trilinear leads (G=-8, B=-16) and the residual tap
+gain seam is small (`a≈1.0, b≈+400`) — handled by `dual_tap_correct`. Validated on
+`/Volumes/Video/fullroll.raw`; operator confirmed even colours. Committed `8d6f511`.
 
 ### Aspect ratio
 
@@ -485,13 +513,22 @@ Fix: `--resample-to 3000x2000` (Lanczos, `!`-forced exact size via ImageMagick).
 Without resampling, the full-roll frames are ~3430×2007 ≈ 1.7:1 (wrong).
 With `--resample-to 3000x2000`: correct 3:2 = 2:3 portrait / landscape. ✓
 
-### Frame boundary detection
+### Frame boundary detection — OPEN, needs a rewrite to a fixed-pitch grid model
 
-`pakon_image.py --frames N` now uses per-row detail valley detection (smoothed
-std-across-columns profile, local minima near expected spacing). Works well for
-`scan.raw` 4-frame. Still approximate for the 24-frame full-roll — some cuts
-land slightly off the inter-frame gap. Needs further work; for now the user can
-inspect and re-run with adjusted spacing if needed.
+`pakon_image.py` currently uses per-row detail valley detection (central-50%-
+columns std profile, local minima ranked by prominence, auto-count via the
+largest prominence ratio gap). It works OK for `scan.raw` 4-frame but is **wrong
+for the whole-roll LowRes case** — frames come out uneven and occasionally
+double-count a dark scene row as a gap.
+
+**Operator's correct model (implement next, do NOT trim/pad to patch it up):**
+35mm frames are a **standard fixed width**; inter-frame **pitch is consistent**.
+So detect the pitch ONCE (autocorrelation of the detail signal or median valley
+spacing), lay a **regular grid** of fixed-width crops (operator wants exactly
+**3000 px** wide each), exclude the **bright pre-roll** (open-gate white before
+the neg was inserted), and let the frame COUNT fall out of roll-length ÷ pitch
+(drop the `--frames` arg). The per-frame measure-then-trim/pad approach was
+tried this session and **rejected/reverted** — do not repeat it.
 
 ### pakon_image.py current command
 
