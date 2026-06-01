@@ -119,6 +119,23 @@ int main(void)
         CHECK(pakon_calib_channel_mean(r, 1, 1) == 0, "empty window mean == 0");
     }
 
+    /* ---- synthesized CONFIGURE defaults (OEM validated values) ---- */
+    {
+        pakon_calib_config c = pakon_calib_default_config();
+        CHECK(c.gain[0]==13 && c.gain[1]==13 && c.gain[2]==13, "default gain == 13");
+        CHECK(c.offset[0]==-38 && c.offset[1]==-31 && c.offset[2]==-31,
+              "default offset == -38/-31/-31 (OEM converged)");
+        CHECK(c.height==0x0c1a, "default height == 0x0c1a");
+        CHECK(c.control==0x0160, "default control == 0x0160");
+        CHECK(c.timing5==0x07fb && c.timing10==0x0400, "default timing regs set");
+        /* the configure frame for gain_R reproduces the OEM wire bytes */
+        pakon_packet pkt;
+        const uint8_t gr[] = {0x02,0x06,0x24,0x03,0x84,0x02,0x0d,0x00};
+        pakon_calib_build_write(&pkt, PAKON_BANK_AFE, PAKON_REG_GAIN_R,
+                                pakon_calib_enc_gain(c.gain[0]));
+        CHECK(frame_is(&pkt, gr, sizeof(gr)), "configured Gain_R frame == OEM bytes");
+    }
+
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "all calib tests passed",
            failures);
     return failures ? 1 : 0;

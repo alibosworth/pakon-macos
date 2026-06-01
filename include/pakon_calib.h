@@ -150,6 +150,54 @@ unsigned pakon_calib_channel_mean(const uint16_t *ch, size_t col0, size_t col1);
 /* Peak (max) of `ch[col0 .. col1)`. Returns 0 if the range is empty. */
 unsigned pakon_calib_channel_peak(const uint16_t *ch, size_t col0, size_t col1);
 
+/* ---- synthesized CONFIGURE (capture-free register programming) ------------ */
+
+/*
+ * The full CCD calibration register set, written to wire addr 0x24 (PICM). The
+ * defaults (pakon_calib_default_config) are the OEM's FINAL converged values from
+ * the reference capture — validated, not frozen-from-replay: we emit them as
+ * named registers from C, so a scan no longer depends on a captured .pakscan.
+ * gain/offset are the live-calibratable fields; the timing/AFE constants are the
+ * fixed sensor setup. NOTE CcdExposure (0x82.1/2/3) is 0 in the OEM final state —
+ * integration is governed by the timing regs (4/5/9/0xa), not exposure.
+ */
+typedef struct {
+    uint16_t control;      /* 0x82.0  control bitmask        (OEM 0x0160) */
+    uint16_t exposure[3];  /* 0x82.1/2/3 CcdExposure R/G/B    (OEM 0)      */
+    uint16_t timing4;      /* 0x82.4                          (OEM 0x002b) */
+    uint16_t timing5;      /* 0x82.5                          (OEM 0x07fb) */
+    uint16_t height;       /* 0x82.6  Height/integration      (OEM 0x0c1a) */
+    uint16_t timing9;      /* 0x82.9                          (OEM 0x001f) */
+    uint16_t timing10;     /* 0x82.0a                         (OEM 0x0400) */
+    uint16_t afe0;         /* 0x84.0  AFE config              (OEM 0x0078) */
+    uint16_t afe1;         /* 0x84.1  AFE config              (OEM 0x0080) */
+    int      gain[3];      /* 0x84.2/3/4 Gain R/G/B           (OEM 13)     */
+    int      offset[3];    /* 0x84.5/6/7 Offset R/G/B (signed)(OEM -38/-31/-31) */
+} pakon_calib_config;
+
+/* The OEM's validated converged calibration (from the reference capture). */
+pakon_calib_config pakon_calib_default_config(void);
+
+/*
+ * Program the full calibration register set onto the device (wire addr 0x24),
+ * timing bank first then AFE. Assumes OPEN + PIC/CCD init already done (the fixed
+ * boilerplate, e.g. via the captured init prelude). Returns the first non-OK
+ * result, or PAKON_OK if every register write was accepted.
+ */
+pakon_result pakon_calib_configure(pakon_dev *dev, const pakon_calib_config *cfg,
+                                   unsigned timeout_ms);
+
+/* ---- cached-calibration (EEPROM) drift detection -------------------------- */
+
+/*
+ * Baseline checksums of the param table read from the reference unit (the u32 at
+ * offset 4 of each framed region; see pakon_replay --read-params). If a freshly
+ * read table matches these, the default_config above is valid for this unit; a
+ * mismatch means the scanner recalibrated or it is a different unit.
+ */
+#define PAKON_CALIB_EEPROM_CKSUM_R1  0x52ffea66u
+#define PAKON_CALIB_EEPROM_CKSUM_R2  0x873e6ed3u
+
 /* ---- driven calibration (hardware) ---------------------------------------- */
 
 /* Per-channel result of a calibration pass. */

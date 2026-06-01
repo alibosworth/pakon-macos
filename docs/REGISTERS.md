@@ -286,6 +286,30 @@ the numbers a correct driven CALIBRATE should land near):
 offsets — the pre-calibration reset — then converges to the values above. Seeing
 our driven loop arrive near gain≈13 / offset≈−45 is the on-hardware success signal.)
 
+**Full converged CONFIGURE register set** (OEM FINAL values = last write to each
+register in the capture; shipped as `pakon_calib_default_config()`, written by
+`pakon_calib_configure()` to addr `0x24`, hardware-accepted via `--configure`):
+
+| bank.reg | field | value | notes |
+|----------|-------|-------|-------|
+| 0x82.0 | control bitmask | `0x0160` | |
+| 0x82.1/2/3 | CcdExposure R/G/B | `0x0000` | **0 — integration is NOT here** |
+| 0x82.4 | timing | `0x002b` | |
+| 0x82.5 | timing | `0x07fb` | integration-related |
+| 0x82.6 | Height | `0x0c1a` | 3098 |
+| 0x82.9 | timing | `0x001f` | |
+| 0x82.0a | timing | `0x0400` | |
+| 0x84.0 | AFE cfg | `0x0078` | |
+| 0x84.1 | AFE cfg | `0x0080` | |
+| 0x84.2/3/4 | Gain R/G/B | `0x000d` (13) | |
+| 0x84.5/6/7 | Offset R/G/B | `0x0126`/`0x011f`/`0x011f` | sign-mag = **−38/−31/−31** |
+
+⚠️ **Integration is governed by timing regs 0x82.4/5/9/0xa, NOT CcdExposure
+(0x82.1/2/3 = 0)** — a hardware sweep writing 0x82.1/2/3 had zero effect on the
+open-gate level. The synthesized-CONFIGURE path writes this validated set from C and
+uses the EEPROM table's checksum (`PAKON_CALIB_EEPROM_CKSUM_R1/R2`) to detect drift,
+reaching a reproducible scan without a live open-gate gain measurement.
+
 **Open items before hardware iteration:** the F-135 illumination/lamp control
 (see Lamp section — the one real unknown) and the exact `.data` target constants
 (`_DAT_1006f268`≈64000.0, gain `k`); both confirmable on hardware by reading back.

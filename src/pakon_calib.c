@@ -118,6 +118,63 @@ unsigned pakon_calib_channel_peak(const uint16_t *ch, size_t col0, size_t col1)
     return peak;
 }
 
+/* ---- synthesized CONFIGURE ------------------------------------------------ */
+
+pakon_calib_config pakon_calib_default_config(void)
+{
+    /* OEM final converged values from the reference capture (scan.pakscan). */
+    pakon_calib_config c = {0};
+    c.control  = 0x0160;
+    c.exposure[0] = c.exposure[1] = c.exposure[2] = 0; /* integration via timing */
+    c.timing4  = 0x002b;
+    c.timing5  = 0x07fb;
+    c.height   = 0x0c1a;
+    c.timing9  = 0x001f;
+    c.timing10 = 0x0400;
+    c.afe0     = 0x0078;
+    c.afe1     = 0x0080;
+    c.gain[0]  = c.gain[1]  = c.gain[2]  = 13;
+    c.offset[0] = -38; c.offset[1] = -31; c.offset[2] = -31;
+    return c;
+}
+
+pakon_result pakon_calib_configure(pakon_dev *dev, const pakon_calib_config *cfg,
+                                   unsigned timeout_ms)
+{
+    if (!dev || !cfg) return PAKON_ERR_PARAM;
+    if (timeout_ms == 0) timeout_ms = 2000;
+
+    /* (bank, reg, raw 16-bit value) program order: timing bank then AFE. */
+    struct { uint8_t bank, reg; uint16_t val; } regs[] = {
+        {PAKON_BANK_TIMING, 0,  cfg->control},
+        {PAKON_BANK_TIMING, PAKON_REG_EXPOSURE_R, pakon_calib_enc_exposure((int)cfg->exposure[0])},
+        {PAKON_BANK_TIMING, PAKON_REG_EXPOSURE_G, pakon_calib_enc_exposure((int)cfg->exposure[1])},
+        {PAKON_BANK_TIMING, PAKON_REG_EXPOSURE_B, pakon_calib_enc_exposure((int)cfg->exposure[2])},
+        {PAKON_BANK_TIMING, 4,  cfg->timing4},
+        {PAKON_BANK_TIMING, 5,  cfg->timing5},
+        {PAKON_BANK_TIMING, PAKON_REG_HEIGHT, cfg->height},
+        {PAKON_BANK_TIMING, 9,  cfg->timing9},
+        {PAKON_BANK_TIMING, 10, cfg->timing10},
+        {PAKON_BANK_AFE, 0, cfg->afe0},
+        {PAKON_BANK_AFE, 1, cfg->afe1},
+        {PAKON_BANK_AFE, PAKON_REG_GAIN_R, pakon_calib_enc_gain(cfg->gain[0])},
+        {PAKON_BANK_AFE, PAKON_REG_GAIN_G, pakon_calib_enc_gain(cfg->gain[1])},
+        {PAKON_BANK_AFE, PAKON_REG_GAIN_B, pakon_calib_enc_gain(cfg->gain[2])},
+        {PAKON_BANK_AFE, PAKON_REG_OFFSET_R, pakon_calib_enc_offset(cfg->offset[0])},
+        {PAKON_BANK_AFE, PAKON_REG_OFFSET_G, pakon_calib_enc_offset(cfg->offset[1])},
+        {PAKON_BANK_AFE, PAKON_REG_OFFSET_B, pakon_calib_enc_offset(cfg->offset[2])},
+    };
+    for (size_t i = 0; i < sizeof(regs)/sizeof(regs[0]); i++) {
+        pakon_packet pkt, reply;
+        pakon_result r = pakon_calib_build_write(&pkt, regs[i].bank, regs[i].reg,
+                                                 regs[i].val);
+        if (r != PAKON_OK) return r;
+        r = pakon_cmd(dev, &pkt, &reply, timeout_ms);
+        if (r != PAKON_OK) return r;
+    }
+    return PAKON_OK;
+}
+
 /* ---- hardware-driving loops ----------------------------------------------- */
 
 /* Line geometry: 8000 samples / line => 2666 pixels per channel. */
