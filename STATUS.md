@@ -180,7 +180,21 @@ algorithm, (3) driven C backend.
      work, docs/IMAGING.md).
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — driven backend works; two C fixes implemented, AWAIT HW TEST.**
+- **REGRESSION + REVERT (2026-06-01).** The synthesized 4-command teardown
+  (`sm_teardown`) was a MISTAKE and is reverted. It assumed `02 04 20 01 80 00` =
+  "lamp off" (unconfirmed) and replaced the known-good captured 761-command teardown
+  replay (`sm_replay_teardown`, which reliably returns the device to Idle 0/5). The
+  result: the next scan read **dark (~316, no illumination)** and the engine wasn't
+  fully reset (status LEDs kept blinking = stuck in scan mode), so it never
+  auto-stopped (ran to cap) and a mid-feed stop **jammed the film** (recovered with
+  `pakon_replay resources/advance.pakscan --steps N`). LESSON: do not synthesize
+  teardown/illumination commands from assumptions — the lamp-on/off control is still
+  an UNKNOWN (see Lamp section). The driven scan-out + captured-teardown replay is
+  the known-good baseline (it captured real photos). End-of-roll left at brightness
+  60% (IR-aware) — its fair test was confounded by the dark/lamp-off regression;
+  re-test once the device is clean (lamp on).
+
+**Milestone 3 — driven backend works; teardown reverted to known-good.**
 After the real-film run didn't auto-stop and left the scanner dirty (lamp/LEDs on),
 fixed in C (build clean, unit tests pass; validate on next power-cycle):
 - **End-of-roll for negatives** — `sm_chunk_is_blank()` keys on UNIFORMITY (mean-abs-

@@ -615,38 +615,6 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     if (film_seen_out) *film_seen_out = film_seen;
 }
 
-/* Synthesized clean teardown (capture-free). Halts the stream FIRST (readout-stop
- * 92), then motor-stop (a2), lamp/illumination OFF (02 04 20 01 80 00), and clears
- * the integration strobe (control reg0 -> 0x0160); then drains any buffered 0x86.
- * Stops-first (vs the capture's lamp-first order) is what makes it robust when
- * called mid-stream after a cap/abort: the engine is still streaming, and the lamp
- * will not turn off until the readout halts. MUST be run on every exit (normal,
- * cap, or abort) -- killing the host process does NOT stop the scanner; only this
- * (or a power cycle) does, which is why an interrupted run leaves the LEDs/lamp on. */
-static void sm_teardown(pakon_dev *dev, unsigned timeout,
-                        unsigned long *ncmd, unsigned long *errs)
-{
-    static const struct { uint8_t b[8]; size_t n; } seq[] = {
-        {{0x04,0x03,0x20,0x00,0x92}, 5},                 /* readout STOP (halt stream) */
-        {{0x04,0x03,0x24,0x00,0xa2}, 5},                 /* motor STOP */
-        {{0x02,0x04,0x20,0x01,0x80,0x00}, 6},            /* lamp / illumination OFF */
-        {{0x02,0x06,0x24,0x03,0x82,0x00,0x60,0x01}, 8},  /* control reg0 -> 0x0160 */
-    };
-    pakon_packet reply;
-    for (size_t i = 0; i < sizeof(seq)/sizeof(seq[0]); i++) {
-        if (sm_cmd(dev, seq[i].b, seq[i].n, &reply, timeout) != PAKON_OK) (*errs)++;
-        (*ncmd)++;
-    }
-    /* drain any image bytes still buffered so the next session starts clean */
-    uint8_t tmp[20480];
-    for (int i = 0; i < 16; i++) {
-        size_t got = 0;
-        pakon_result r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, tmp, sizeof(tmp),
-                                        &got, 500);
-        if (got == 0 || (r != PAKON_OK && r != PAKON_ERR_TIMEOUT)) break;
-    }
-}
-
 /* Replay the captured teardown tail: every O/C line AFTER the last image read.
  * This is the driver's stop + engine-reset sequence (the bare 92/a2 stop plus
  * the PICM/PICL register resets that follow). Without it the engines are left
@@ -802,11 +770,24 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
             fprintf(stderr, "  [sm] WARNING: no film ever detected in the stream "
                     "(stale device state / nothing loaded?)\n");
 
-        /* Phase 3: synthesized clean teardown (capture-free) -- halt readout, stop
-         * motor, lamp off, clear strobe, drain. Robust mid-stream (cap/abort). */
-        printf("  [sm] teardown: halting readout + motor, lamp off, clearing strobe...\n");
-        sm_teardown(dev, timeout, &ncmd, &errs);
-        printf("  [sm] teardown done (engines stopped, lamp off, buffer drained)\n");
+        /* Phase 3: replay the captured teardown (stop + engine reset) -- the
+         * driver's full 761-command tail. This is the KNOWN-GOOD reset (returns
+         * the device to Idle 0/5). A synthesized 4-command teardown was tried and
+         * REVERTED: it assumed 02 04 20 01 80 00 = "lamp off" and left both the
+         * illumination off (next scan read dark) and the engine not fully reset.
+         * Do not re-synthesize the teardown without knowing each command. */
+        printf("  [sm] replaying captured teardown (stop + engine reset)...\n");
+        long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
+        if (td > 0) {
+            printf("  [sm] teardown: %ld commands replayed (engines reset to idle)\n", td);
+        } else {
+            uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
+            uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
+            sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
+            sm_cmd(dev, stop_motor,   sizeof(stop_motor),   NULL, timeout);
+            ncmd += 2;
+            printf("  [sm] no teardown tail in script; sent bare stop (92, a2)\n");
+        }
     }
     (void)took_over;
 
