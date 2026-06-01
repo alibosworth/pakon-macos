@@ -1,17 +1,16 @@
-# pakon-sane
+# pakon
 
-A cross-platform (Linux + macOS) [SANE](http://www.sane-project.org/) backend
-for the Kodak/Pakon **F-135** film scanner (and the "Plus" / F-235 / F-335
-variants). Unofficial, independent reimplementation built from documented
-protocol notes, our own USB captures, and reverse engineering of the original
-Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
+A cross-platform (Linux + macOS) driver and web app for the Kodak/Pakon
+**F-135** film scanner (and the "Plus" / F-235 / F-335 variants). Unofficial,
+independent reimplementation built from documented protocol notes, our own USB
+captures, and reverse engineering of the original Windows software for
+interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 
-> **Status:** Phases 0–5 complete. Full end-to-end scan works on hardware —
-> firmware load, open handshake, film advance, scan drive, and image decode
-> are all validated on Linux and macOS. Phase 6 is a Python web service
-> (FastAPI + browser UI) that wraps the existing C tools and image pipeline
-> so any machine on the local network can drive the scanner. SANE backend
-> for Linux follows.
+> **Status:** Full end-to-end scan works on hardware — firmware load, open
+> handshake, film advance, scan drive, and image decode are all validated on
+> Linux and macOS. The product is a Python web service (FastAPI + browser UI)
+> that wraps the C tools and image pipeline so any machine on the local network
+> can drive the scanner.
 >
 > The decoder handles both the 4-frame (HiRes) and whole-roll (LowRes) scan
 > modes: IR-band-aware zone splitting, wrap-order de-interleaving, per-zone
@@ -25,16 +24,17 @@ Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 
 ## Architecture
 
-Three strictly separated layers:
+The hardware driver is two strictly separated C layers:
 
 - **transport** (`pakon_usb`): libusb context, enumeration, FX2 firmware
-  download, raw bulk I/O. No packet or SANE knowledge.
+  download, raw bulk I/O. No packet knowledge.
 - **protocol** (`pakon_proto`): the command frame, encode/decode, command
-  primitive. No USB and no SANE knowledge.
-- **SANE** (`backend/pakon.c`): the backend shim (Phase 6), delegating downward.
+  primitive. No USB knowledge.
 
 `pakon_log` is a shared utility (tracing + the common `pakon_result` type) used
-by both lower layers without coupling them to each other.
+by both layers without coupling them to each other. On top of the driver, the
+Python web service (`web/`) drives the C tools and runs the image pipeline
+(`tools/pakon_image.py`) to serve the browser UI.
 
 ## Building
 
@@ -249,8 +249,8 @@ See `firmware/README.md` for provenance and the legal note. The `.pakfw` route
 
 ## License
 
-**TBD.** SANE backends are conventionally GPL; the license will be chosen
-before any release. See `LICENSE`.
+**TBD.** Likely GPL; the license will be chosen before any release. See
+`LICENSE`.
 
 ## Disclaimer
 

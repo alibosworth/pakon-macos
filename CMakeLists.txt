@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pakon_sane C)
+project(pakon C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -32,7 +32,7 @@ target_link_libraries(pakon PRIVATE PkgConfig::LIBUSB)
 # tools and tests that link the static archive resolve the math symbols.
 target_link_libraries(pakon PUBLIC m)
 
-# --- tools (standalone, NOT SANE) ----------------------------------------
+# --- tools (standalone) ---------------------------------------------------
 add_executable(pakon_probe tools/pakon_probe.c)
 target_link_libraries(pakon_probe PRIVATE pakon)
 
@@ -52,6 +52,3 @@ add_test(NAME test_hex COMMAND test_hex)
 add_executable(test_calib test/test_calib.c)
 target_link_libraries(test_calib PRIVATE pakon)
 add_test(NAME test_calib COMMAND test_calib)
-
-# NOTE: the SANE backend (backend/pakon.c) is built in Phase 6 against an
-# installed sane-backends; it is intentionally not a target yet.

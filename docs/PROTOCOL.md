@@ -201,7 +201,7 @@ overflow, EndTime, Reading, ToRead, Writing, NF`; events `EventScanPacketReady`,
 `EventScanWriteToDisk`. It stops on a device end-signal / `StopScan`, **not** on a
 fixed byte count — consistent with our end-of-roll-white auto-stop approach.
 
-### OEM-enforced scan parameter ranges (use as SANE option bounds)
+### OEM-enforced scan parameter ranges (use as scan-option bounds)
 
 From the scan-request validator in `TLA.dll`:
 
@@ -544,6 +544,6 @@ The protocol facts in this file come from two sources, kept distinct:
 The OEM binaries and the Ghidra decompilation output are **third-party
 copyrighted material and are NOT committed to this repository** (the working copy
 lives outside the tree, under `pakon-scanning-software/` and `re/`, both
-git-ignored). This SANE backend is an independent implementation; only
+git-ignored). This project is an independent implementation; only
 factual interface details (IOCTL numbers, request codes, wire shapes, value
 ranges) needed for interoperability are recorded here.

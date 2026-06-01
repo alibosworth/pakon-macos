@@ -1,8 +1,8 @@
 # Project status — feed this to Claude at the start of next session
 
-Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md`;
-the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
-guide. This file is the short "where we left off" snapshot.
+Living protocol notes are in `docs/PROTOCOL.md`; imaging details in
+`docs/IMAGING.md`; the project skill `.claude/skills/pakon-scanner/SKILL.md` has
+the operational guide. This file is the short "where we left off" snapshot.
 
 _Last updated: 2026-06-01 (imaging + web session). DONE: recovered the OEM C-41
 inversion (ColNeg log LUT `out=3500*log10(16383/in)` + per-channel Dmin
@@ -15,8 +15,7 @@ fixed-3000 crops. Web rebuilt as a minilab two-stage flow (prescan preview →
 operator confirms crops → high-res export); raw-negative export retained. Kodak
 ICC profiles committed under `profiles/` (personal use). See `docs/IMAGING.md`.
 OPEN: Digital ICE (scratch/dust) — present in OEM (`DMLDICELib.dll`) but we
-detect+discard the IR band; clean-room ICE is a future option. Next big item:
-SANE backend (Phase 6).)_
+detect+discard the IR band; clean-room ICE is a future option.)_
 
 **OEM Windows software reverse-engineered (2026-05-31).** Cloned the original
 Kodak/Pakon software (`pakon-scanning-software/`, git-ignored) and decompiled the
@@ -569,8 +568,8 @@ raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
     best done from a capture. Until then, prefer verbatim `--scan`.
 - **Phase 6 (Python web service):** **DONE.** FastAPI server + single-page
   browser UI in `web/`. Wraps C tools and `pakon_image.py`. Run with
-  `uvicorn web.app:app --host 0.0.0.0 --port 8000`.
-- **Phase 7 (SANE backend / Linux), 8 (hardening):** not started.
+  `uvicorn web.app:app --host 0.0.0.0 --port 8000`. This is the product —
+  there is no SANE backend (dropped; see `docs/EXPLORE_RUST_MIGRATION.md`).
 
 ## Confirmed hardware/protocol facts (from real captures)
 

@@ -3,9 +3,8 @@
  *
  * Owns the libusb context, device enumeration/classification, firmware
  * download, interface claiming, and raw bulk send/recv. It knows nothing about
- * Pakon packet framing (no pakon_proto types here) and nothing about SANE.
- * The only shared vocabulary with the protocol layer is pakon_result, which
- * lives in pakon_log.h.
+ * Pakon packet framing (no pakon_proto types here). The only shared vocabulary
+ * with the protocol layer is pakon_result, which lives in pakon_log.h.
  *
  * Everything below is declared for the full design but is STUBBED in Phase 0:
  * enumeration, firmware load, and bulk I/O require hardware (Phases 1-2) and

@@ -1,9 +1,8 @@
 LICENSE — TBD
 
-The license for pakon-sane has not been finalized yet. SANE backends are
-conventionally distributed under the GNU GPL (v2 or later); this is the likely
-choice and must be confirmed and replaced with the full license text before any
-public release (Phase 7 / 0.1 tag).
+The license for this project has not been finalized yet. The GNU GPL (v2 or
+later) is the likely choice and must be confirmed and replaced with the full
+license text before any public release (0.1 tag).
 
 Note: the Intel HEX firmware blob shipped under firmware/ is a third-party
 device-bootstrapping artifact with its own (separate) terms — see

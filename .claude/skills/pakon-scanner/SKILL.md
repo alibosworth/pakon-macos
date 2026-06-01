@@ -1,32 +1,34 @@
 ---
 name: pakon-scanner
 description: >
-  Working knowledge for the pakon-sane project — a clean-room cross-platform
-  (Linux + macOS) SANE backend for the Kodak/Pakon F-X35 film scanner. Use when
-  implementing, debugging, building, or testing any part of this repo:
+  Working knowledge for the pakon project — a clean-room cross-platform
+  (Linux + macOS) driver and web app for the Kodak/Pakon F-X35 film scanner. Use
+  when implementing, debugging, building, or testing any part of this repo:
   architecture/layering rules, build & test commands, the documented protocol,
   hard-won hardware facts about the test scanner, and the dev/sync workflow.
 ---
 
-# Pakon F-X35 SANE backend — project guide
+# Pakon F-X35 scanner — project guide
 
-Clean-room reimplementation of a SANE backend for the Kodak/Pakon **F-135**
-(and F-235/F-335/"Plus") film scanner, from documented protocol notes + our own
-USB captures. The full phased plan is in `PAKON_SANE_PLAN.md` (read it before
-starting a new phase). Living protocol notes are in `docs/PROTOCOL.md`.
+Clean-room driver + web app for the Kodak/Pakon **F-135** (and
+F-235/F-335/"Plus") film scanner, from documented protocol notes + our own
+USB captures. Living protocol notes are in `docs/PROTOCOL.md`; imaging in
+`docs/IMAGING.md`; the "where we left off" snapshot in `STATUS.md`. The product
+is the **web service** (`web/`); a possible all-Rust single-binary
+consolidation is explored in `docs/EXPLORE_RUST_MIGRATION.md`.
 
-## Golden rules (from the plan)
+## Golden rules
 
-- **Work one phase at a time, in order.** Several phases need real hardware;
-  stop and tell the human exactly what to run when you hit such a point.
-- **Strict 3-layer separation, no leakage:**
+- **Work incrementally; hardware steps need the Linux box.** Several changes
+  need the real scanner; stop and tell the human exactly what to run when you
+  hit such a point.
+- **Strict layer separation in the C driver, no leakage:**
   - transport (`pakon_usb`): libusb, enumeration, firmware download, bulk I/O.
-    No packet or SANE knowledge.
+    No packet knowledge.
   - protocol (`pakon_proto`): the 36-byte frame, checksum, encode/decode. No
-    libusb, no SANE.
-  - SANE (`backend/pakon.c`, Phase 6): delegates strictly downward.
+    libusb.
   - `pakon_log` is a shared utility (tracing + the common `pakon_result` enum);
-    both lower layers use it without depending on each other.
+    both layers use it without depending on each other.
 - **No speculative code** for undocumented layers. The scan/image path is
   unknown — build tracing/replay scaffolding to discover it (Phases 4–5), don't
   invent it. The FX2 firmware-download protocol and Intel HEX *are* standard, so
@@ -49,8 +51,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Builds: static `libpakon` (log+proto+hex+usb), tools `pakon_probe` &
-`pakon_replay`, unit tests `test_proto` + `test_hex` (both hardware-free). The
-backend target is deferred to Phase 6 (built against installed sane-backends).
+`pakon_replay`, unit tests `test_proto` + `test_hex` (both hardware-free).
 CMake uses `PkgConfig::LIBUSB` (imported target) so the static lib's libusb dep
 propagates to test binaries with correct search dirs.
 
@@ -232,7 +233,7 @@ propagates to test binaries with correct search dirs.
 - `include/` `pakon_log.h` (log + `pakon_result`), `pakon_proto.h` (frame/enums),
   `pakon_hex.h`, `pakon_usb.h` (transport API + VID/PID defines).
 - `src/` matching `.c` files. `tools/pakon_probe.c`, `tools/pakon_replay.c`.
-- `backend/pakon.c` (Phase 6 stub), `backend/pakon.conf` (warm USB IDs).
+- `web/` FastAPI service (`app.py`, `decode.py`) + `web/static/index.html` UI.
 - `test/test_proto.c`, `test/test_hex.c`, `test/captures/` (Phase 4 dumps).
 - `firmware/` (HEX provenance/legal note; no blob committed — not needed given
   auto-warm). `docs/PROTOCOL.md`, `docs/CAPTURE_GUIDE.md`.

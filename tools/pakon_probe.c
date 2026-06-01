@@ -1,5 +1,5 @@
 /*
- * pakon_probe — standalone libusb test harness (NOT a SANE backend).
+ * pakon_probe — standalone libusb test harness.
  *
  * Phase 1 (up to STOP POINT A):
  *   (default)         enumerate; report warm / cold / no device. With a warm

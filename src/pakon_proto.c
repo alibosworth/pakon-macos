@@ -4,7 +4,7 @@
  * Only the pure name-lookup helpers are real here. Checksum, build, and parse
  * are intentionally unimplemented: the checksum algorithm must first be
  * derived and validated against real sample packets in Phase 3 before any of
- * these can be trusted (see "Standing risks" in PAKON_SANE_PLAN.md).
+ * these can be trusted.
  */
 #include "pakon_proto.h"
 

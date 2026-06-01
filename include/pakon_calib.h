@@ -10,7 +10,7 @@
  *
  * Layering: like pakon_cmd, this is glue that uses BOTH lower layers — it builds
  * protocol frames (pakon_proto) and moves them over the transport (pakon_usb,
- * via pakon_cmd). It contains NO SANE knowledge. The pure feedback math and the
+ * via pakon_cmd). The pure feedback math and the
  * frame builders are split out as standalone functions so they can be unit
  * tested without hardware (see test/test_calib.c).
  *

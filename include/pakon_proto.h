@@ -1,8 +1,8 @@
 /*
  * pakon_proto.h — the Pakon packet (framing) layer.
  *
- * Pure byte-level encode/decode. NO transport (libusb) and NO SANE types
- * appear here, by design (see the layering rule in PAKON_SANE_PLAN.md). Only
+ * Pure byte-level encode/decode. NO transport (libusb) appears here, by
+ * design (the protocol layer never reaches down into the transport). Only
  * the documented 36-byte command frame and its enums live at this layer.
  *
  * Documented frame (from the reverse-engineering notes):

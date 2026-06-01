@@ -1,2 +1,0 @@
-# Append this line to sane-backends' dll.conf to enable the Pakon backend.
-pakon
