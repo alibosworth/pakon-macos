@@ -490,6 +490,12 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
 /* (white-detection constants + sm_chunk_is_white live above do_scan, shared.) */
 static const uint8_t SM_MOTOR_START[] = {0x04,0x03,0x24,0x00,0xa0};
 
+/* Replay this many image reads PAST motor-start before taking over, so the
+ * post-motor setup burst (control-strobe reg0=0x0161 + the reg9 integration
+ * writes, which land between reads 1-3 in the capture) is in place — taking over
+ * at the very first read leaves integration unconfigured and the stream stalls. */
+#define SM_TAKEOVER_READS 64u
+
 /* Build + send a frame whose wire bytes are raw[0..n) (raw[0]=type,[1]=count,
  * [2..]=data). Reads (and discards) the reply on EP1 IN. */
 static pakon_result sm_cmd(pakon_dev *dev, const uint8_t *raw, size_t n,
@@ -519,8 +525,6 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
                          unsigned timeout, unsigned long max_mb, int *film_seen_out)
 {
     const uint8_t poll_host[] = {0x03,0x01,0x10};
-    const uint8_t host_arm[]  = {0x02,0x04,0x10,0x01,0x84,0x02};
-    const uint8_t picl_arm[]  = {0x04,0x03,0x20,0x00,0x8a};
 
     uint8_t buf[20480];
     int film_seen = 0;
@@ -528,11 +532,9 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     unsigned long long max_bytes = (unsigned long long)max_mb * 1024u * 1024u;
     pakon_packet reply;
 
-    printf("  [sm] image phase: feed the film now. Waiting up to ~%u s for it, "
-           "reading 0x86 and re-arming on empty; stop on %u trailing-white "
-           "chunks, %u empty windows after film, or %lu MB cap\n",
-           SM_LOAD_WAIT * (SCAN_IMG_TIMEOUT_MS / 1000), SM_TRAIL_WHITE,
-           SM_MAX_EMPTY, max_mb);
+    printf("  [sm] driven image phase: poll HOST + read 0x86 (no re-arm); stop on "
+           "%u trailing-white chunks, %u empty windows after film, or %lu MB cap\n",
+           SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
 
     for (;;) {
         size_t got = 0;
@@ -563,26 +565,18 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         }
         if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) (*errs)++;
 
-        /* A full read window (SCAN_IMG_TIMEOUT_MS) elapsed with zero bytes.
-         * Poll HOST (read-only) for the log, then RE-ARM the CCD. Re-arming on
-         * empty is empirically required: across the green->feed gap and whenever
-         * the film isn't streaming continuously, the readout needs the arm pair
-         * to produce the next block (this is the same arming the preview phase
-         * does). When film DOES stream continuously there are no empty reads, so
-         * this never fires mid-scan -- matching the trace.
-         *
-         * Read BOTH arm replies (07 02 ..) to keep EP1 IN balanced -- one reply
-         * per command -- but ignore their content. Their status is not
-         * meaningful here, and the working build ignored them entirely; do NOT
-         * abort on an odd/short reply (that was a self-inflicted desync bug). The
-         * SM_LOAD_WAIT / SM_MAX_EMPTY bounds below already cap any spin. */
+        /* A read window elapsed with zero bytes. Poll HOST (READ-ONLY) and use
+         * its status: 0x80 = busy/starved (more data coming, keep waiting), 0x00
+         * = ready/idle (nothing in flight). We do NOT re-arm: once the motor runs
+         * the CCD free-runs continuously, and kicking 8a into a live stream wedges
+         * the bus (the old re-arm-on-empty bug). The SM_LOAD_WAIT / SM_MAX_EMPTY
+         * bounds cap the spin; teardown (Phase 3) is what actually stops it. */
         uint8_t st = 0xff;
         if (sm_cmd(dev, poll_host, sizeof(poll_host), &reply, timeout) == PAKON_OK)
             st = pakon_packet_status(&reply);
         else (*errs)++;
-        sm_cmd(dev, host_arm, sizeof(host_arm), &reply, timeout);
-        sm_cmd(dev, picl_arm, sizeof(picl_arm), &reply, timeout);
-        (*ncmd) += 3;
+        (*ncmd)++;
+        if (st == 0x80) continue;   /* device busy -> data still coming, wait */
 
         idle++;
         if (!film_seen) {                 /* operator still feeding the film */
@@ -693,9 +687,11 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
     unsigned long ncmd = 0, nimg = 0, errs = 0;
     unsigned long long img_bytes = 0;
     int rc = 0, passed_motor_start = 0, took_over = 0;
+    unsigned reads_after_motor = 0;
 
-    /* Phase 1: replay the deterministic setup spine, including preview/cal
-     * image reads, up to the first image read AFTER motor start. */
+    /* Phase 1: replay the deterministic setup spine, including preview/cal image
+     * reads and the post-motor setup burst, up to SM_TAKEOVER_READS reads after
+     * motor start; then hand off to the poll-driven loop. */
     while (fgets(line, sizeof(line), fp)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -720,8 +716,9 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
                 printf("  [sm] motor start (a0) replayed at cmd %lu\n", ncmd);
             }
         } else if (*p == 'M') {
-            if (passed_motor_start) {           /* hand off to the poll loop */
-                printf("  [sm] setup replayed (%lu cmds); taking over scan\n", ncmd);
+            if (passed_motor_start && reads_after_motor >= SM_TAKEOVER_READS) {
+                printf("  [sm] setup + burst replayed (%lu cmds, %u reads past "
+                       "motor); taking over scan\n", ncmd, reads_after_motor);
                 took_over = 1;
                 break;
             }
@@ -732,6 +729,7 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
             if (got) { fwrite(buf, 1, got, img); img_bytes += got; }
             if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) errs++;
             nimg++;
+            if (passed_motor_start) reads_after_motor++;
         } else if (*p == 'C') {
             unsigned brt, breq, wval, widx, wlen; int consumed = 0;
             if (sscanf(p + 1, "%x %x %x %x %x%n", &brt,&breq,&wval,&widx,&wlen,&consumed) != 5) {

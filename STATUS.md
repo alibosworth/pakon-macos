@@ -147,9 +147,40 @@ algorithm, (3) driven C backend.
   unit. KEY: CcdExposure regs 0x82.1/2/3 are 0 in the OEM final state — integration
   is via timing regs 4/5/9/0xa (why the earlier --cal-exposure sweep did nothing).
   Unit-tested; on main.
+- **Milestone 3 → DRIVEN SCAN-OUT WORKS on hardware (2026-06-01).** Fixed the
+  long-standing `--scan-sm` stall: two bugs — (1) it took over at the FIRST image
+  read after motor-start, *before* the post-motor setup burst (control-strobe
+  `reg0=0x0161` + `reg9` integration writes at reads 1–3), leaving integration
+  unconfigured; (2) it re-armed `8a` into the live stream (wedge). Fix: replay
+  `SM_TAKEOVER_READS`=64 reads past motor-start (captures the burst), then a
+  poll-`03 01 10`+read loop with **no re-arm** (status 0x80=busy→wait, 0x00=ready),
+  stop on end-of-roll/cap, then **mandatory teardown**. Result open-gate (no film):
+  1409 reads, 28.8 MB, continuous stream, **0 transfer errors**, teardown reset to
+  idle, and a following `--open` reached Idle (0/5) — device healthy. The
+  length-independent driven scan-out is proven.
+  - Cadence facts (offline + traced): `03 01 10` reply `03 03 10 00 aa`=ready /
+    `…80 aa`=busy; steady state = poll+read, no re-arm; frame-boundary housekeeping
+    fires ~4× (trigger TBD, skippable for open-gate / handled by replay-to-takeover);
+    teardown (`92` readout-stop + `a2` motor-stop + PICL resets) is MANDATORY —
+    killing the host does NOT stop the motor.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — wire CONFIGURE into a full DRIVEN scan (replace verbatim --scan).**
+**Milestone 3 — essentially COMPLETE; polish remaining.** The capture-free driven
+backend now works end to end on hardware: OPEN → param-read+drift-check → CONFIGURE
+(synthesized) → dark-offset calibrate (validated) → DRIVEN scan-out (validated) →
+teardown. What's still *replayed* (acceptable — fixed boilerplate, not calibration):
+the PIC/CCD init+setup spine before takeover and the teardown tail (both from
+`scan.pakscan`). Optional polish:
+- Synthesize the init spine + teardown in C to drop the `.pakscan` dependency entirely.
+- Pin the frame-boundary housekeeping trigger (a poll-status flag) for film scans
+  longer than the takeover window — capture a CLEAN traced scan WITH film that ejects
+  normally (film handling was finicky on 2026-06-01). For open-gate / short scans it's
+  not needed.
+- Wire CONFIGURE + dark-offset into the driven scan path (currently the scan-out is
+  validated standalone via `--scan-sm`; fold our calibration in ahead of it).
+
+(Earlier sub-goal superseded: the full verbatim --scan still works as the reference;
+--scan-sm is now the length-independent driven path.)
 The pieces now exist capture-free: OPEN handshake (synthesized), param-table read +
 drift check (`--read-params`), CONFIGURE (`pakon_calib_configure`, hardware-accepted),
 dark-offset live refine (hardware-validated). Remaining: the PIC/CCD **init
