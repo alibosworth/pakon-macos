@@ -275,7 +275,17 @@ static int hexbytes(const char *s, uint8_t *out, size_t max)
 #define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
                                    * operator to feed the film (~5s each, ~2 min) */
 
-/* Is a 0x86 chunk dominated by open-gate white (no film)? */
+/* End-of-roll for the DRIVEN path is detected by UNIFORMITY, not brightness: the
+ * open gate (no film) is a uniform field (low spatial variance) whether the lamp
+ * makes it bright (positive/no-film) or not, whereas film -- positive OR negative
+ * -- carries image detail (high variance). The old brightness test (sm_chunk_is_
+ * white) fails on negatives, which transmit bright through the orange mask/clear
+ * base and so never trip a "darker than open gate" rule. */
+#define SM_BLANK_MAD     1200u   /* mean-abs-deviation below this => uniform (no film) */
+#define SM_TRAIL_BLANK   16u     /* consecutive uniform chunks after film => end of roll
+                                  * (generous, so inter-frame gaps don't false-stop) */
+
+/* Is a 0x86 chunk dominated by open-gate white (no film)? (verbatim --autostop) */
 static int sm_chunk_is_white(const uint8_t *buf, size_t got)
 {
     size_t samples = got / 2;
@@ -286,6 +296,28 @@ static int sm_chunk_is_white(const uint8_t *buf, size_t got)
         if (v > SM_WHITE_THRESH) white++;
     }
     return white * 100u >= samples * SM_WHITE_FRAC_PCT;
+}
+
+/* Is a 0x86 chunk a uniform field (no film in the gate)? Mean-absolute-deviation
+ * of the 16-bit samples; low MAD = flat/uniform. Sampled for speed. Brightness-
+ * agnostic, so it works for negatives too. */
+static int sm_chunk_is_blank(const uint8_t *buf, size_t got)
+{
+    size_t n = got / 2;
+    if (n < 256) return 0;
+    size_t stride = n > 4096 ? n / 4096 : 1;
+    uint64_t sum = 0; size_t cnt = 0;
+    for (size_t i = 0; i < n; i += stride) {
+        unsigned v = (unsigned)buf[2*i] | ((unsigned)buf[2*i+1] << 8);
+        sum += v; cnt++;
+    }
+    unsigned mean = (unsigned)(sum / cnt);
+    uint64_t adsum = 0;
+    for (size_t i = 0; i < n; i += stride) {
+        unsigned v = (unsigned)buf[2*i] | ((unsigned)buf[2*i+1] << 8);
+        adsum += (v > mean) ? (v - mean) : (mean - v);
+    }
+    return (unsigned)(adsum / cnt) < SM_BLANK_MAD;
 }
 
 /* After the script ends, keep polling + draining 0x86 until it goes quiet.
@@ -533,8 +565,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     pakon_packet reply;
 
     printf("  [sm] driven image phase: poll HOST + read 0x86 (no re-arm); stop on "
-           "%u trailing-white chunks, %u empty windows after film, or %lu MB cap\n",
-           SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
+           "%u trailing-uniform chunks, %u empty windows after film, or %lu MB cap\n",
+           SM_TRAIL_BLANK, SM_MAX_EMPTY, max_mb);
 
     for (;;) {
         size_t got = 0;
@@ -545,13 +577,14 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             *img_bytes += got;
             (*nimg)++;
             idle = 0;
-            if (sm_chunk_is_white(buf, got)) {
-                if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
-                    printf("  [sm] end-of-roll white (%u chunks) after %llu bytes "
-                           "-> film fully scanned\n", trail_white, *img_bytes);
+            if (sm_chunk_is_blank(buf, got)) {     /* uniform field = no film */
+                if (film_seen && ++trail_white >= SM_TRAIL_BLANK) {
+                    printf("  [sm] end-of-roll: %u uniform chunks after film "
+                           "-> film fully scanned (%llu bytes)\n",
+                           trail_white, *img_bytes);
                     break;
                 }
-            } else {
+            } else {                               /* image detail = film present */
                 if (!film_seen)
                     printf("  [sm] film detected at %llu bytes\n", *img_bytes);
                 film_seen = 1;
@@ -600,6 +633,38 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
         }
     }
     if (film_seen_out) *film_seen_out = film_seen;
+}
+
+/* Synthesized clean teardown (capture-free). Halts the stream FIRST (readout-stop
+ * 92), then motor-stop (a2), lamp/illumination OFF (02 04 20 01 80 00), and clears
+ * the integration strobe (control reg0 -> 0x0160); then drains any buffered 0x86.
+ * Stops-first (vs the capture's lamp-first order) is what makes it robust when
+ * called mid-stream after a cap/abort: the engine is still streaming, and the lamp
+ * will not turn off until the readout halts. MUST be run on every exit (normal,
+ * cap, or abort) -- killing the host process does NOT stop the scanner; only this
+ * (or a power cycle) does, which is why an interrupted run leaves the LEDs/lamp on. */
+static void sm_teardown(pakon_dev *dev, unsigned timeout,
+                        unsigned long *ncmd, unsigned long *errs)
+{
+    static const struct { uint8_t b[8]; size_t n; } seq[] = {
+        {{0x04,0x03,0x20,0x00,0x92}, 5},                 /* readout STOP (halt stream) */
+        {{0x04,0x03,0x24,0x00,0xa2}, 5},                 /* motor STOP */
+        {{0x02,0x04,0x20,0x01,0x80,0x00}, 6},            /* lamp / illumination OFF */
+        {{0x02,0x06,0x24,0x03,0x82,0x00,0x60,0x01}, 8},  /* control reg0 -> 0x0160 */
+    };
+    pakon_packet reply;
+    for (size_t i = 0; i < sizeof(seq)/sizeof(seq[0]); i++) {
+        if (sm_cmd(dev, seq[i].b, seq[i].n, &reply, timeout) != PAKON_OK) (*errs)++;
+        (*ncmd)++;
+    }
+    /* drain any image bytes still buffered so the next session starts clean */
+    uint8_t tmp[20480];
+    for (int i = 0; i < 16; i++) {
+        size_t got = 0;
+        pakon_result r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN, tmp, sizeof(tmp),
+                                        &got, 500);
+        if (got == 0 || (r != PAKON_OK && r != PAKON_ERR_TIMEOUT)) break;
+    }
 }
 
 /* Replay the captured teardown tail: every O/C line AFTER the last image read.
@@ -757,22 +822,11 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
             fprintf(stderr, "  [sm] WARNING: no film ever detected in the stream "
                     "(stale device state / nothing loaded?)\n");
 
-        /* Phase 3: replay the captured teardown (stop + engine reset). The loop
-         * only issued read-only polls, so the command channel is alive here. A
-         * bare 92/a2 leaves the engines mid-state and hangs the next op, so we
-         * replay the driver's full teardown tail; bare stop is the fallback. */
-        printf("  [sm] replaying captured teardown (stop + engine reset)...\n");
-        long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
-        if (td > 0) {
-            printf("  [sm] teardown: %ld commands replayed (engines reset to idle)\n", td);
-        } else {
-            uint8_t stop_readout[] = {0x04,0x03,0x20,0x00,0x92};
-            uint8_t stop_motor[]   = {0x04,0x03,0x24,0x00,0xa2};
-            sm_cmd(dev, stop_readout, sizeof(stop_readout), NULL, timeout);
-            sm_cmd(dev, stop_motor,   sizeof(stop_motor),   NULL, timeout);
-            ncmd += 2;
-            printf("  [sm] no teardown tail in script; sent bare stop (92, a2)\n");
-        }
+        /* Phase 3: synthesized clean teardown (capture-free) -- halt readout, stop
+         * motor, lamp off, clear strobe, drain. Robust mid-stream (cap/abort). */
+        printf("  [sm] teardown: halting readout + motor, lamp off, clearing strobe...\n");
+        sm_teardown(dev, timeout, &ncmd, &errs);
+        printf("  [sm] teardown done (engines stopped, lamp off, buffer drained)\n");
     }
     (void)took_over;
 

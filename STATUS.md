@@ -180,11 +180,24 @@ algorithm, (3) driven C backend.
      work, docs/IMAGING.md).
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — COMPLETE (capture-free driven backend validated with real film).**
-Polish items, in priority order:
-- **End-of-roll for negatives**: replace brightness-based `sm_chunk_is_white` with a
-  variance/detail-based "no-film" detector so driven scans of negatives auto-stop.
-- **Frame-split robustness** on long/blank-padded scans. The capture-free driven
+**Milestone 3 — driven backend works; two C fixes implemented, AWAIT HW TEST.**
+After the real-film run didn't auto-stop and left the scanner dirty (lamp/LEDs on),
+fixed in C (build clean, unit tests pass; validate on next power-cycle):
+- **End-of-roll for negatives** — `sm_chunk_is_blank()` keys on UNIFORMITY (mean-abs-
+  deviation < `SM_BLANK_MAD`=1200), not brightness, so a negative (bright via orange
+  mask) still auto-stops after `SM_TRAIL_BLANK`=16 trailing uniform chunks. Replaces
+  the brightness `sm_chunk_is_white` in the driven loop.
+- **Robust clean teardown** — `sm_teardown()` (capture-free) halts readout `92` FIRST,
+  then motor `a2`, then lamp OFF `02 04 20 01 80 00`, clears strobe (reg0→0x0160),
+  drains 0x86. Stops-first works mid-stream (the cause of the lamp-left-on dirty
+  state); replaces the replayed captured tail in `--scan-sm`. Runs on every exit.
+- Tunables to verify on hardware: `SM_BLANK_MAD` (uniform threshold) and the
+  teardown command ORDER (stops-first is a reasoned change from the OEM's lamp-first
+  capture order — confirm it leaves LEDs clean).
+
+NEXT: power-cycle, reload firmware, `--scan-sm` a negative; confirm it auto-stops at
+end-of-roll AND a following `--open` reaches Idle (0/5) with LEDs normal. Then
+frame-split robustness (Python) and C-41 inversion are the only remaining polish. The capture-free driven
 backend now works end to end on hardware: OPEN → param-read+drift-check → CONFIGURE
 (synthesized) → dark-offset calibrate (validated) → DRIVEN scan-out (validated) →
 teardown. What's still *replayed* (acceptable — fixed boilerplate, not calibration):
