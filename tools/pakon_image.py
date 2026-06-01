@@ -84,7 +84,7 @@ def measure_leads(chans, c0, c1):
             "b": _vlead(chans["b"][:, c0:c1], chans["r"][:, c0:c1])}
 
 
-def register_zones(chans, zones, leads_per_zone):
+def register_zones(chans, zones, leads_per_zone, correct_seam=False):
     """Co-register the trilinear R/G/B planes and assemble the visible image.
 
     `zones` is a list of (c0, c1) column ranges in *output order*; for a
@@ -104,7 +104,43 @@ def register_zones(chans, zones, leads_per_zone):
     for (c0, c1), leads in zip(zones, leads_per_zone):
         out = {c: chans[c][gm - leads[c]: gm - leads[c] + L, c0:c1] for c in chans}
         parts.append(np.stack([out["r"], out["g"], out["b"]], axis=-1))
+    if correct_seam:
+        parts = dual_tap_correct(parts)
     return np.concatenate(parts, axis=1)
+
+
+def dual_tap_correct(parts, seam_cols=50):
+    """Correct the dual-tap CCD gain/offset seam for wrap-split (LowRes) scans.
+
+    When the IR band sits in the middle of the line the visible image wraps into
+    two zones, each read by a different CCD output tap with its own analogue
+    gain and offset. This produces a hard per-channel tint seam at the zone
+    junction. Fix: measure per-channel pixel statistics at the seam boundary
+    (last seam_cols of zone 0 and first seam_cols of zone 1) and apply a linear
+    gain+offset correction to zone 0 so it matches zone 1 at the seam.
+    """
+    if len(parts) != 2:
+        return parts
+    z0 = parts[0].astype(np.float64)
+    z1 = parts[1].astype(np.float64)
+    k = min(seam_cols, z0.shape[1], z1.shape[1])
+    s0 = z0[:, -k:, :].reshape(-1, 3)
+    s1 = z1[:, :k, :].reshape(-1, 3)
+    ch_names = ("R", "G", "B")
+    corrected = z0.copy()
+    for ch in range(3):
+        mu0, mu1 = s0[:, ch].mean(), s1[:, ch].mean()
+        sigma0, sigma1 = s0[:, ch].std(), s1[:, ch].std()
+        if sigma0 > 1.0:
+            a = sigma1 / sigma0
+            b = mu1 - a * mu0
+        else:
+            a, b = 1.0, mu1 - mu0
+        print(f"  dual-tap {ch_names[ch]}: a={a:.4f} b={b:+.1f}  "
+              f"seam mu {mu0:.0f} -> {mu1:.0f}")
+        corrected[:, :, ch] = a * z0[:, :, ch] + b
+    return [np.clip(corrected, 0, 65535).astype(np.uint16),
+            np.clip(z1, 0, 65535).astype(np.uint16)]
 
 
 def find_ir_band(chans, full):
@@ -263,6 +299,11 @@ def main():
                     default=True,
                     help="co-register the trilinear R/G/B sensor lines (default "
                          "on; fixes colour ghosting at edges)")
+    ap.add_argument("--seam-correct", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="correct dual-tap CCD gain/offset seam for wrap-split "
+                         "(LowRes/full-roll) scans (default on; no-op for "
+                         "single-zone HiRes scans)")
     ap.add_argument("--reg-leads",
                     help="force channel leads in lines as 'G,B' (rel. to R), "
                          "e.g. 16,8; default = auto-measure")
@@ -329,7 +370,9 @@ def main():
     else:
         leads_per_zone = [{"r": 0, "g": 0, "b": 0} for _ in zones]
 
-    rgb = register_zones(chans, zones, leads_per_zone)  # (lines, Wvis, 3)
+    correct_seam = args.seam_correct and len(zones) == 2
+    rgb = register_zones(chans, zones, leads_per_zone,
+                         correct_seam=correct_seam)  # (lines, Wvis, 3)
     order_idx = {"r": 0, "g": 1, "b": 2}
     perm = [order_idx[c] for c in args.order.lower()]
     if perm != [0, 1, 2]:
