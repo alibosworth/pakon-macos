@@ -254,69 +254,80 @@ def autocrop(rgb):
     return rgb[r0:r1 + 1, c0:c1 + 1], (r0, r1, c0, c1)
 
 
-def find_frame_boundaries(ribbon, n_frames=None):
-    """Find inter-frame boundary row positions.
+def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
+    """Lay a regular fixed-pitch frame grid over the ribbon.
 
-    If n_frames is given, returns exactly (n_frames-1) boundaries (top
-    by prominence). If n_frames is None, auto-detects frame count from
-    the valley prominence distribution: the largest ratio between
-    consecutive sorted prominence values marks the separation between
-    real inter-frame gaps and noise.
+    35mm frames are a constant width with a consistent inter-frame pitch, so
+    rather than measuring each gap independently we fit a single global grid:
+    find the pitch P and phase φ that put every cut line in a low-detail
+    inter-frame gap simultaneously. The bright pre-roll (open-gate white before
+    the negative was inserted) is excluded first.
 
-    Uses the central 50% of columns to avoid constant film-edge stripes.
-    Returns a sorted list of boundary row indices.
+    Returns (cut_rows, pitch) where cut_rows is the sorted list of inter-frame
+    boundary rows spanning the film, and pitch is the period in rows. The caller
+    crops a fixed width centred in each [cut_k, cut_{k+1}] cell.
     """
     rows, cols, _ = ribbon.shape
-    if n_frames is not None and n_frames <= 1:
-        return []
 
-    step_r = max(1, rows // 6000)
+    # Per-row detail + brightness on the central columns (avoids edge stripes).
+    step_r = max(1, rows // 8000)
     cen0, cen1 = cols // 4, 3 * cols // 4
     step_c = max(1, (cen1 - cen0) // 200)
-    lum = ribbon[::step_r, cen0:cen1:step_c, :].astype(np.float32).mean(2)
-    detail = lum.std(1)
+    sub = ribbon[::step_r, cen0:cen1:step_c, :].astype(np.float32)
+    detail = sub.mean(2).std(1)
+    bright = sub.mean((1, 2))
+    n = len(detail)
 
-    win = max(5, int(0.02 * len(detail)))
-    smoothed = np.convolve(detail, np.ones(win) / win, mode='same')
+    win = max(3, int(0.01 * n))
+    det_s = np.convolve(detail, np.ones(win) / win, mode='same')
+    dnorm = (det_s - det_s.min()) / (det_s.max() - det_s.min() + 1e-9)
 
-    half = max(3, len(smoothed) // (3 * (n_frames or 30)))
-    valleys = [i for i in range(half, len(smoothed) - half)
-               if smoothed[i] == smoothed[i - half: i + half + 1].min()]
+    # Exclude the bright pre-roll: the leading run of anomalously bright rows
+    # (open-gate white, ~2-4x the film-base median) before the film loads.
+    med = np.median(bright)
+    start = 0
+    for i in range(n):
+        if bright[i] > 1.6 * med:
+            start = i + 1
+        elif i - start > 30:
+            break
+    end = n
 
-    def prominence(i):
-        l = smoothed[:i].max() if i > 0 else smoothed[i]
-        r = smoothed[i + 1:].max() if i < len(smoothed) - 1 else smoothed[i]
-        return min(l, r) - smoothed[i]
+    # Grid fit: choose pitch P and phase φ minimising mean detail at the cut
+    # lines (cuts fall in gaps → low detail). Restricted to the film region.
+    P_lo, P_hi = max(2, pitch_lo // step_r), pitch_hi // step_r
+    if n_frames and n_frames > 1:
+        # Caller fixed the count → pitch is the film span / n_frames; only φ free.
+        P_lo = P_hi = max(2, (end - start) // n_frames)
+    best = None
+    for P in range(P_lo, P_hi + 1):
+        for phase in range(0, P, max(1, P // 40)):
+            cuts = np.arange(phase, n, P)
+            cuts = cuts[(cuts >= start) & (cuts < end)]
+            if len(cuts) < 3:
+                continue
+            score = dnorm[cuts].mean()
+            if best is None or score < best[0]:
+                best = (score, P, phase)
+    if best is None:
+        return [], 0
+    _, P, phase = best
 
-    prom = {i: prominence(i) for i in valleys}
-
-    if n_frames is not None:
-        # Caller knows the count: take top (n_frames-1) by prominence
-        if len(valleys) < n_frames - 1:
-            # Fallback: equal-spacing
-            expected = len(smoothed) // n_frames
-            half_fb = max(expected // 4, 10)
-            bnd = []
-            for k in range(1, n_frames):
-                lo = max(0, k * expected - half_fb)
-                hi = min(len(smoothed), k * expected + half_fb)
-                bnd.append(int((lo + int(np.argmin(smoothed[lo:hi]))) * step_r))
-            return sorted(bnd)
-        selected = sorted(sorted(valleys, key=lambda i: -prom[i])[:n_frames - 1])
-        return [int(i * step_r) for i in selected]
-
-    # Auto-detect: find the largest prominence ratio gap to separate real
-    # inter-frame gaps from noise, then keep everything above the threshold.
-    if not valleys:
-        return []
-    sorted_prom = sorted(prom[i] for i in valleys)
-    # Find the biggest jump between consecutive sorted prominence values
-    best_ratio, threshold = 1.0, sorted_prom[0]
-    for a, b in zip(sorted_prom, sorted_prom[1:]):
-        if a > 0 and b / a > best_ratio:
-            best_ratio, threshold = b / a, (a + b) / 2
-    real = sorted(i for i in valleys if prom[i] > threshold)
-    return [int(i * step_r) for i in real]
+    # Grid lines (the inter-frame gaps) within the film region.
+    grid = [c for c in range(phase, n, P) if start < c < end]
+    # The film before the first gap and after the last gap are the first/last
+    # frames; bound them with the region edges.
+    cut_rows = sorted({start, end} | set(grid))
+    # Drop degenerate cells (a region edge landing right next to a grid line):
+    # any cell narrower than half a pitch is post/pre-roll junk, not a frame.
+    min_cell = P // 2
+    pruned = [cut_rows[0]]
+    for c in cut_rows[1:]:
+        if c - pruned[-1] >= min_cell:
+            pruned.append(c)
+        elif c == cut_rows[-1]:
+            pruned[-1] = c  # keep the true end, drop the too-close grid line
+    return [int(c * step_r) for c in pruned], P * step_r
 
 
 def write_preview(rgb16, path, maxdim=1000):
@@ -446,30 +457,31 @@ def main():
 
     rot = (args.rotate // 90) % 4
 
-    boundaries = find_frame_boundaries(rgb, args.frames)
-    fr = len(boundaries) + 1 if boundaries else 1
-    split_rows = [0] + boundaries + [rgb.shape[0]]
-
-    if fr > 1:
-        frame_widths = [split_rows[i + 1] - split_rows[i] for i in range(fr)]
-        target_w = min(int(np.median(frame_widths)), 3000)
-        print(f"detected {fr} frames, boundaries (rows): {boundaries}")
-        print(f"frame widths: min={min(frame_widths)} med={int(np.median(frame_widths))} "
-              f"max={max(frame_widths)}  -> normalising to {target_w}")
-    else:
+    # Fixed-pitch frame grid (35mm frames are constant width, consistent pitch).
+    cut_rows, pitch = find_frame_grid(rgb, args.frames)
+    fr = max(0, len(cut_rows) - 1)
+    if fr <= 1:
+        # No grid (single frame / short ribbon): emit the whole thing.
+        cut_rows, fr = [0, rgb.shape[0]], 1
         target_w = None
+        print("single frame")
+    else:
+        # Output width = the pitch (a full frame cell), capped at 3000. The small
+        # inter-frame gap sits at the cell edges, so a fixed crop ≤ pitch centred
+        # in each cell keeps just the frame. Every frame gets the same width.
+        target_w = min(pitch, 3000)
+        print(f"frame grid: pitch={pitch} rows, {fr} frames, "
+              f"cuts={cut_rows}, output width {target_w}")
 
     for i in range(fr):
-        r_start = split_rows[i]
-        r_end = split_rows[i + 1]
+        r_start, r_end = cut_rows[i], cut_rows[i + 1]
         if target_w is not None:
-            # Centre-crop to target_w; clamp to ribbon bounds
+            # Centre a fixed-width window inside this grid cell so every frame
+            # is the same width and the inter-frame gaps are trimmed equally.
             centre = (r_start + r_end) // 2
             r_start = max(0, centre - target_w // 2)
-            r_end = r_start + target_w
-            if r_end > rgb.shape[0]:
-                r_end = rgb.shape[0]
-                r_start = max(0, r_end - target_w)
+            r_end = min(rgb.shape[0], r_start + target_w)
+            r_start = max(0, r_end - target_w)
         part = rgb[r_start:r_end]
         if rot:
             part = np.rot90(part, k=rot)
