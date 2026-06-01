@@ -4,10 +4,19 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-06-01 (LowRes decode session. CONFIRMED: the dual-tap "seam"
-was a zone1 channel-order bug — fixed, colours now even. OPEN: LowRes frame
-splitting needs a fixed-width + fixed-pitch grid model (current per-frame valley
-detection rejected as wrong). Then C-41 inversion. See NEXT TASK.)_
+_Last updated: 2026-06-01 (imaging + web session). DONE: recovered the OEM C-41
+inversion (ColNeg log LUT `out=3500*log10(16383/in)` + per-channel Dmin
+normalisation; NOT the SCP stage) and the vibrant JPEG render (Kodak `rpd.pf` ICC
+profile + scene balance + highlight roll-off) — both shipped in
+`tools/pakon_image.py` (`--invert-c41`, `--jpeg`) and verified against OEM
+reference scans of two rolls. Channel order is a fixed per-zone constant
+(purple-cast bug solved). Framing: autocorrelation pitch → auto count → centred
+fixed-3000 crops. Web rebuilt as a minilab two-stage flow (prescan preview →
+operator confirms crops → high-res export); raw-negative export retained. Kodak
+ICC profiles committed under `profiles/` (personal use). See `docs/IMAGING.md`.
+OPEN: Digital ICE (scratch/dust) — present in OEM (`DMLDICELib.dll`) but we
+detect+discard the IR band; clean-room ICE is a future option. Next big item:
+SANE backend (Phase 6).)_
 
 **OEM Windows software reverse-engineered (2026-05-31).** Cloned the original
 Kodak/Pakon software (`pakon-scanning-software/`, git-ignored) and decompiled the

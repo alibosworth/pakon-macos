@@ -191,6 +191,22 @@ propagates to test binaries with correct search dirs.
     **orange mask**; proper fix is mask-aware/density-space inversion (dedicated
     film software, or an optional in-tool mode — naive `max-raw` can't do it).
   - A poll-until-ready state machine is the robust follow-up to verbatim replay.
+- **IMAGING UPDATE (2026-06-01) — supersedes the B,R,G + "Q2 deferred" notes
+  above; full detail in `docs/IMAGING.md`.**
+  - **C-41 inversion RECOVERED + shipped** (`pakon_image.py --invert-c41`): the OEM
+    "ColNeg" path = per-channel Dmin (film-base) normalisation → shared log-density
+    LUT `out = 3500*log10(16383/in)` → sRGB. NOT the SCP stage (that's balance).
+    Matrix + gray-world WB off by default. Verified vs OEM reference scans.
+  - **Vibrant JPEG render** (`--jpeg`): Kodak `rpd.pf` ICC profile (in `profiles/`,
+    committed) + scene-balance + highlight roll-off.
+  - **Channel order is a FIXED per-zone constant** (zone0 pos0=R,1=G,2=B; zone1
+    pos0=B,1=R,2=G), NOT the global B,R,G claimed above and NOT per-scan;
+    `--channel-order fixed` default. Wrong order = purple cast (the recurring bug).
+  - **Framing:** autocorrelation pitch → auto count (never forced) → centred
+    fixed-3000 crops.
+  - **Web = two-stage minilab flow** (prescan preview → confirm crops → export);
+    see [[web-minilab-workflow]]. Digital ICE NOT implemented; see
+    [[digital-ice-status]].
 - **Film advance protocol CONFIRMED from `advance.pakscan` capture.**
   - PICL motor-init writes → PICM enable + duration write (`02 05 24 02 a5 1c 25`)
     → `04 03 24 00 a0` (start) → poll HOST (`03 01 10`) until `PS_SUCCESS` (frame

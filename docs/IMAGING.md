@@ -1,122 +1,144 @@
 # Pakon F-X35 imaging pipeline — "the look"
 
-This document records how the original Kodak/Pakon software turns the raw `0x86`
-image stream into the finished, characteristically-rendered scans the F-135 is
-known for — and how that maps onto our tools. The wire/transport side is in
-`docs/PROTOCOL.md`; this file is the image-processing side.
+How the raw `0x86` image stream becomes a finished scan, and how our tools
+reproduce it. Wire/transport is in `docs/PROTOCOL.md`; this is the image side.
 
-See the **PROVENANCE** note at the end: the OEM details here come from reverse
-engineering the original Windows software for interoperability. The OEM binaries
-and their data files are **not** committed to this repo.
+See **PROVENANCE** at the end: the OEM details come from reverse engineering the
+original Windows software for interoperability. OEM binaries/data are **not**
+committed.
 
-## TL;DR
+## TL;DR (current)
 
-- The famous "Pakon look" is **not** the negative→positive inversion. The
-  inversion is a single early step; the look is Kodak's **Ansel photofinishing
-  ("minilab") pipeline** — a cascade of ~48 data-driven stages — stacked on top.
-- The C-41 **orange-mask removal / inversion** is the **SCP (Scan Color
-  Processing)** stage, via per-channel **Dmin** subtraction (`modifyDmin = true`),
-  **not** a naive `max − raw`. This answers the long-standing "Q2" question.
-- Our `tools/pakon_image.py` currently does **neither** inversion nor rendering —
-  it outputs registered, autocropped **raw negatives** (orange mask intact) and
-  defers inversion to external film software (Negative Lab Pro, darktable
-  negadoctor). That is *a* look, not *the* Pakon look, because those tools use a
-  different inversion + rendering philosophy.
+- The C-41 negative→positive **inversion** is the OEM **"ColNeg" path**
+  (`PIColorCorrectColNegPlanarScan`), a single shared **log-density LUT** plus a
+  3×3+offset crosstalk matrix — **not** the SCP stage (earlier guess), and not a
+  naive `max − raw`. Recovered exactly.
+- The vibrant **JPEG "look"** is the inverted image run through Kodak's **`rpd.pf`
+  ICC rendering profile** + a scene-balance/tone pass. The plain **TIFF** is the
+  scene-referred positive (no render).
+- `tools/pakon_image.py` now implements **both**: `--invert-c41` (faithful
+  positive) and `--jpeg` (rpd.pf render). It also auto-detects per-zone channel
+  order, registers the trilinear lines, autocrops, and detects frames.
+- The web service is a **two-stage minilab flow**: prescan → operator confirms
+  crops in the browser → high-res export.
 
-## What our pipeline does today (for contrast)
+## The recovered inversion (the important bit)
 
-`tools/pakon_image.py` (see `docs/PROTOCOL.md` → "Image format"):
-deinterleave 16-bit LE samples → trilinear R/G/B line registration → wrap-order
-de-interleave (whole-roll IR-band case) → autocrop → rotate → optional resample.
-Output: 16-bit RGB TIFF **raw negative**. No mask removal, no scene balance, no
-tone rendering.
+Source: decompiled `PakonIMAu.dll` (`re/out/PakonIMAu.c`) + `Config/ColorCorrection/`.
+The OEM exposes export toggles (PSI "Other Options", classes `CiColorCorrection`
+vs `CiColorCorrectionKodak`):
 
-## The OEM imaging architecture (Kodak "Ansel")
+1. **Color Correction (12-bit RPD)** — `rpd.pf`, a real Kodak KCMS ICC profile
+   (a `RPD_dls_3` + `yellow5` cascade). The Kodak colour science.
+2. **Color Scene Balance (8-bit sRGB)** — SBA/DSBA, per-scene auto colour+density
+   balance (brightness/neutralise/pop).
+3. **Color Adjustments** — brightness/contrast/green/blue sliders; `Defaults.ini`
+   shows these default to **neutral** for nearly all film products.
 
-`PakonIMAu.dll` ("Pakon Image Acquisition") is built on Kodak's **Ansel** image
-library — the same color science used in Kodak photofinishing minilabs. Evidence
-from the decompile (`re/out/PakonIMAu.c`): build paths `\Atc\ansel\src\…`,
-classes `CiColorCorrectionAnsel`, `AnsLut`, `AnsImaBuilder`, and an
-`anselinstalldir/` data tree containing `minilab.txt` / `minilab.reg`.
+### ColNeg LUT + matrix — `Config/ColorCorrection/_ClientColNeg*.txt`
 
-The pipeline is **data-driven**: each stage reads ASCII LUT/param files from
-`anselinstalldir/dataPathItems/<stage>/` (48 stages) and `Config/ColorCorrection/`.
-The shipped install has 333 such files (220 `.dpi` params, 69 `.pf` profiles,
-23 `.lut`, 21 `.map`).
+- **`_ClientColNegLut.txt`** — a single shared 14-bit curve, fit *exactly* (0 error
+  over all 16384 entries):
 
-### Stage order (the "look" is the whole cascade)
+  ```
+  out = 3500 · log10(16383 / in)        [in = 0 → 16383]
+  ```
 
-| # | Stage (dir) | Role |
-|---|-------------|------|
-| 1 | `filmLut/`  | film density → scene image (per-film characterization curve) |
-| 2 | `SCPLut/`   | **Scan Color Processing — the C-41 orange-mask removal / inversion** |
-| 3 | `dsba/`, `sba/` | **Digital Scene Balance Algorithm** — auto color + density balance per scene across the roll (the minilab magic) |
-| 4 | `flesh/`    | flesh-tone-aware correction (the skin-tone rendering people rave about) |
-| 5 | `toneHelper/` (+ decision trees), `contrast/`, `lighting/` | tonal rendering, per processing **path** |
-| 6 | `fugc/`, `deRender/`, `reRender/` | gamut compression + RIMM/ROMM/ERIMM scene-referred colorspace management |
-| 7 | `Config/ColorCorrection/*.pf` | final user-facing choice: `srgb.pf`, `romm.pf`, saturation `satminus15…satplus15`, B&W `cold_bw`/`warm_bw`/`sepia`, `ColRevLut*` |
+  i.e. `density = log10(reference / signal)` scaled at 3500 code-values per
+  density decade. THIS is the tonal flip. (`pakon_image.py:_c41_lut`.)
+- **`_ClientColNegMat.txt`** — a 3×3 + offset dye-crosstalk / orange-mask matrix
+  (diag ≈1.1, small negative off-diagonals, offsets [-82.6, -586.9, -707.8]).
 
-Plus many supporting stages: `flare`, `falloff`, `dyefade`, `exposure`,
-`gainOffset`, `blackPrinting`, `neutralGammaAdjust`, `noiseFiltering`,
-`adaptSharp`/`SharpenAdjust`, etc.
+**Correction to the old note:** the **SCP** stage (`AnsSCPLut`, `FUN_10287eb0`) is
+NOT the inversion — it's a per-channel **affine** LUT (`out = i·slope − offset`),
+a balance/mask-normalisation step inside the separate Ansel "premium" cascade.
+A positive-slope linear map can't flip a negative. `filmLut` ships as identity, so
+no characterization curve is involved.
 
-Named **processing paths** select a whole rendering personality:
-`CN-Enhanced`, `CN-Premium`, `DC-Premium`, `CP-Balance` (`CiColorCorrectionAnsel::bStartNewRoll`).
+## What `tools/pakon_image.py` does today
 
-### File formats (parseable — ASCII)
+Deinterleave 16-bit LE → **fixed per-zone channel order** → trilinear R/G/B line
+registration → wrap-order de-interleave (whole-roll IR-band case) → autocrop →
+detect frames → per-frame crop → invert/render → TIFF/JPEG.
 
-**filmLut** (`.lut`) — a 1-D LUT, plain text:
+- **`--invert-c41`** (the faithful positive): per-channel **Dmin** normalisation
+  (orange-mask removal / white balance — the film base is measured robustly as a
+  median of local high-percentile bands, never a single whole-roll percentile) →
+  the ColNeg log LUT → sRGB encode. **Matrix and gray-world WB are OFF by default**
+  — the matrix offsets over-subtract G/B in our scale (red cast), and gray-world
+  strips intentional scene warmth (blue lean). Dmin normalisation alone matches
+  the OEM. Verified against the OEM reference scans of two rolls.
+- **`--jpeg`** (the vibrant render): the sRGB positive → `rpd.pf` via littleCMS →
+  an SBA surrogate (per-channel auto-levels + midtone gamma) + a **soft highlight
+  shoulder** that, unlike the OEM, does *not* blow out highlights. Flags
+  `--rpd-profile`, `--jpeg-gamma`, `--jpeg-quality`. Profiles live in `profiles/`
+  (committed; Kodak © — see `profiles/README.md`).
 
-```
-LUT_NAME = filmLut-scanner-prod-gen-default-default-default.lut
-NUM_LUT  = 4096        # 12-bit input domain
-NUM_BANDS = 3          # R, G, B output
-LUT_DATA = 0   0   0   0      # index  R  G  B  (tab-separated)
-           1   1   1   1
-           …
-           4095 4095 4095 4095
-```
+### Channel order (a fixed constant — was the "purple" bug)
 
-The shipped default filmLut is an **identity** map ("Full default identity lut"),
-and **no film-type-specific variants ship in this install**. So the OEM does the
-film characterization at scan time (calibration + SCP Dmin auto-detection + DSBA),
-not via a library of per-stock LUTs.
+The two CCD output taps emit R/G/B in a fixed, zone-specific interleave order. It
+is a **hardware/replay-phase constant, NOT per-scan**:
 
-**SCPLut** (`.dpi`) — the inversion/mask parameters:
+| zone | interleave |
+|------|-----------|
+| zone0 (after-IR)  | pos0=R, pos1=G, pos2=B  (perm `{r:b, g:r, b:g}`) |
+| zone1 (before-IR) | pos0=B, pos1=R, pos2=G  (identity) |
 
-```
-offsetOption          = ANS_SCPLUT_ZERO_PIVOT
-modifyDmin            = true     # per-channel Dmin (film base) subtraction = mask removal
-useSCPLut            = true
-visualWeighting      = true
-runSCPAfterLut       = true
-proportionalCorrection = 0.7
-slopeDeltaThreshold  = 0.30
-```
+Verified against OEM refs on two different rolls. `--channel-order fixed`
+(default). Orange-base **auto-detection** (`--channel-order auto`) was tried but is
+unreliable on dark/red-dominant rolls (the bright percentile catches scene
+highlights, not clean film base, and flips G/B → purple cast), so it is opt-in.
 
-So the **C-41 inversion is a mask-aware, density-space operation**: detect the
-per-channel film base (Dmin), subtract/normalize it (`modifyDmin`), pivot at zero,
-apply with 0.7 proportional correction — then the rest of the pipeline renders.
+### Framing
 
-## Implications for our tools
+`find_frame_grid`: never forces a count. Measures the true frame **pitch** by
+autocorrelation of the per-row detail profile → count = `round(span/pitch)` →
+phase-locked uniform comb → snap each tooth to its gap → drop leader/partial end
+cells. The caller crops a **fixed 3000-px window centred between gaps** (the
+leftover splits evenly as edge margin; per-gap rebate measurement was unreliable).
+In the web flow the detected centres only *seed* the interactive confirmation.
 
-- A faithful-to-Pakon positive needs **at minimum** the SCP-style Dmin inversion
-  (per-channel base detection + density-space invert), which is well-specified
-  above and implementable in `pakon_image.py` as an optional mode — a big step up
-  from handing raw negatives to external software.
-- The *full* look additionally needs DSBA (scene balance) + tone/contrast/colorspace
-  rendering. Those are larger reverse-engineering efforts (the `.dpi` parameter
-  formats + the algorithms); the LUTs being ASCII makes it feasible but not small.
-- Keeping the current "output raw negative, invert externally" path is still
-  valid and is the safest default; a Pakon-style mode would be additive.
+## The OEM "Ansel" cascade (the full minilab look — context)
+
+`PakonIMAu.dll` is built on Kodak's **Ansel** library (build paths `\Atc\ansel\src\`,
+classes `CiColorCorrectionAnsel`, `AnsLut`, `AnsImaBuilder`; `anselinstalldir/`).
+Data-driven: ~48 stages of ASCII LUT/param files (`dataPathItems/<stage>/`,
+`Config/ColorCorrection/`; 333 files in the install). Stage order:
+
+| # | Stage | Role |
+|---|-------|------|
+| 1 | `filmLut/` | film density → scene (ships identity) |
+| 2 | `SCPLut/`  | Scan Color Processing — per-channel **balance** (not the inversion) |
+| 3 | `dsba/`,`sba/` | Digital Scene Balance — per-scene auto colour+density balance |
+| 4 | `flesh/` | flesh-tone correction |
+| 5 | `toneHelper/`,`contrast/`,`lighting/` | tonal rendering per **path** (`CN-Enhanced`, `CN-Premium`, `DC-Premium`, `CP-Balance`) |
+| 6 | `fugc/`,`deRender/`,`reRender/` | gamut + RIMM/ROMM colorspace mgmt |
+| 7 | `Config/ColorCorrection/*.pf` | output colourspace (`srgb.pf`, `romm.pf`, `satminus15…satplus15`, B&W, `ColRevLut*`) |
+
+Our `--jpeg` path reproduces the *practical* result (RPD profile + balance/tone)
+without re-implementing the whole cascade.
+
+## Digital ICE (dust/scratch removal) — NOT implemented
+
+The scanner captures an **IR channel** (separate Ir lamp/exposure;
+`WaitForLamp_Ir`, `Current_Ir`, `CcdExposure_Ir`; the IR is a defect map — IR
+passes through dye but is blocked by physical dust/scratches). The OEM applies
+Digital ICE via **`DMLDICELib.dll`** (loaded by `CN_CiDLLDigitalIce`; PSI "Use
+Scratch Removal"; `IrChannelSavedInPlanarFile`, `IrCrossTalkFactor`).
+
+**We do neither.** `find_ir_band` locates the IR band only to delimit the visible
+zones (the IR lands mid-line and the image wraps around it), then **discards** it.
+A clean-room ICE (use the IR plane → threshold to a defect mask → inpaint) is a
+possible future feature; the IR data is captured but currently thrown away. Open
+question: whether our ~658-col IR band is a full per-pixel-aligned IR image or a
+narrower readout strip — verify before building on it.
 
 ## PROVENANCE
 
-The OEM imaging details above come from reverse engineering the original
-Kodak/Pakon Windows software (Ghidra decompilation of `PakonIMAu.dll` +
-inspection of its `anselinstalldir/` data files), done **for interoperability**.
-The OEM binaries, their LUT/profile data, and the decompilation output are
-**third-party copyrighted material and are NOT committed to this repository**
-(working copies live outside the tree under `pakon-scanning-software/` and `re/`,
-both git-ignored). Only factual descriptions needed to understand and
-interoperate with the format are recorded here.
+OEM imaging details come from reverse engineering the original Kodak/Pakon Windows
+software (Ghidra decompilation of `PakonIMAu.dll`/`TLA`/`TLC` + inspection of the
+`Config/ColorCorrection/` data) **for interoperability**. The OEM binaries and the
+decompilation output are third-party copyrighted and are **NOT committed** (working
+copies under `pakon-scanning-software/` and `re/`, git-ignored). The Kodak ICC
+profiles + ColNeg data needed to reproduce the inversion are committed under
+`profiles/` for personal/local use only (see `profiles/README.md`).

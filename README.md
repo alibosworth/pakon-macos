@@ -14,10 +14,14 @@ Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 > for Linux follows.
 >
 > The decoder handles both the 4-frame (HiRes) and whole-roll (LowRes) scan
-> modes, including Digital ICE IR channel removal, wrap-order de-interleaving,
-> per-zone trilinear registration, per-zone channel-order correction (the two
-> CCD taps interleave RGB differently), and fixed-pitch frame splitting that
-> auto-detects the frame count and emits uniform-width crops.
+> modes: IR-band-aware zone splitting, wrap-order de-interleaving, per-zone
+> trilinear registration, fixed per-zone channel order, autocrop, and
+> autocorrelation-based frame detection. It also reproduces the OEM colour:
+> the recovered **C-41 inversion** (a log-density ColNeg LUT) for a faithful
+> positive, and the Kodak **`rpd.pf`** rendering profile for the vibrant JPEG
+> look (see `docs/IMAGING.md`). The web UI is a **minilab-style two-stage
+> flow** — prescan preview → operator confirms each crop in the browser →
+> high-res export.
 
 ## Architecture
 
@@ -147,56 +151,52 @@ transfer errors at the very end are normal.
 **6. Decode the image**
 
 **Option A — web UI (recommended):** start the web service (see below) and
-open `http://localhost:8000` in a browser. Upload the `.raw` file, set the
-frame count, click Process, and download individual TIFFs or a zip of all frames.
+open `http://localhost:8000`. Upload the `.raw`, click **Process** (prescan →
+long preview strip + detected frames), **confirm/position each crop** on the
+strip, then **Export** for high-res output (raw negative TIFF, plain positive
+TIFF, and rendered JPEG per frame, plus a contact sheet).
 
-**Option B — command line:** requires Python 3, `numpy`, and ImageMagick (`magick`).
+**Option B — command line:** requires Python 3, `numpy`, `pillow` (with
+littlecms, for `--jpeg`), and ImageMagick (`magick`).
 
 ```sh
-# 4-frame strip
-python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4 --resample-to 3000x2000
+# Faithful C-41 positive (16-bit TIFFs), auto frame count + auto orientation
+python3 tools/pakon_image.py scan.raw --invert-c41 --rotate 90
 
-# Whole roll — omit --frames to auto-detect the count from the inter-frame gaps
-python3 tools/pakon_image.py fullroll.raw --rotate 90 --resample-to 3000x2000
+# Also write the vibrant rendered JPEGs (Kodak rpd.pf profile)
+python3 tools/pakon_image.py scan.raw --invert-c41 --jpeg --rotate 90
+
+# Raw negatives only (orange mask intact) for inverting in another tool
+python3 tools/pakon_image.py scan.raw --rotate 90
 ```
 
-> **Whole-roll frame splitting:** the decoder fits a fixed-pitch grid (35mm
-> frames are a constant width with consistent spacing), excludes the bright
-> open-gate pre-roll, and emits uniform 3000 px-wide frames. The frame count is
-> auto-detected from the grid; pass `--frames N` to force a known count.
+The frame count is **always auto-detected** (a "36-exposure" roll commonly scans
+as 37+ usable frames). The decoder automatically handles:
 
-Writes `frame_1.tif` … `frame_N.tif` as 16-bit RGB TIFFs — registered,
-autocropped raw negatives, orange mask intact. Feed them to Negative Lab Pro,
-darktable negadoctor, or similar for proper C-41 inversion. (Note: that gives
-*a* look, not *the* Pakon look — the original software renders via Kodak's Ansel
-minilab pipeline; see `docs/IMAGING.md`.)
-
-The decoder automatically handles:
-- **Digital ICE IR channel** — a ~658 px neutral-grayscale band embedded in
-  each scan line for dust/scratch detection; detected and removed automatically
-- **Wrap-order de-interleaving** — in whole-roll mode the IR band lands in the
-  middle of the line, wrapping the visible image; the decoder rejoins the halves
-  at the correct sensor seam
-- **Per-zone trilinear registration** — the two wrapped halves come from
-  opposite CCD tap ends with different R/G/B line offsets and are registered
-  independently (eliminates colour ghosting at edges)
-- **Per-zone channel-order correction** — the two CCD taps interleave RGB in
-  different orders (zone0 = B,R,G; zone1 = G,B,R); the decoder remaps zone1 so
-  colours match across the seam (otherwise the wrapped half is mis-coloured and
-  the seam shows a hard tint step)
-- **Aspect ratio correction** — raw pixels are non-square; `--resample-to
-  3000x2000` outputs correct 3:2 geometry matching Pakon's native resolution
+- **C-41 inversion** (`--invert-c41`) — the recovered OEM ColNeg log-density
+  curve `out = 3500·log10(16383/in)` + per-channel film-base (Dmin) normalisation
+  (orange-mask removal). Without it, output is the raw negative for external
+  inversion (Negative Lab Pro, darktable negadoctor, …).
+- **Rendered JPEG** (`--jpeg`) — the Kodak `rpd.pf` ICC profile + scene balance +
+  a highlight roll-off that keeps detail the OEM blows out. See `docs/IMAGING.md`.
+- **IR (Digital ICE) band** — detected and used to delimit the visible zones,
+  then discarded (we do **not** do scratch removal — see `docs/IMAGING.md`).
+- **Wrap-order de-interleaving**, **per-zone trilinear registration**, and a
+  **fixed per-zone channel order** (the two CCD taps interleave RGB differently).
+- **Frame detection** — autocorrelation pitch → count → phase-locked comb →
+  fixed-width centred crops.
 
 Key decoder options:
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--frames N` | auto | force N frames; omit to auto-detect from the fixed-pitch grid |
+| `--invert-c41` | off | OEM-faithful C-41 positive (ColNeg log LUT + Dmin) |
+| `--jpeg` | off | also write the `rpd.pf`-rendered JPEG (needs `profiles/rpd.pf`) |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
-| `--resample-to WxH` | off | resample to exact size (use `3000x2000` for 35mm) |
+| `--frames N` | auto | optional hard override of the auto-detected count |
+| `--channel-order {fixed,auto,brg}` | fixed | per-zone R/G/B identity (fixed is verified) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
-| `--autocrop` / `--no-autocrop` | on | strip leader, blank pre-load scan, and gate margin |
-| `--invert` | off | quick linear positive (preview only — not real C-41) |
+| `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin |
 | `-o PREFIX` | `frame` | output filename prefix |
 
 ### Debug logging
@@ -220,18 +220,26 @@ browser UI for the full workflow: firmware load, scan, and image processing.
 Any device on the local network can then open it.
 
 ```sh
-pip install fastapi uvicorn python-multipart numpy pillow
+pip install fastapi uvicorn python-multipart numpy pillow tifffile
 uvicorn web.app:app --host 0.0.0.0 --port 8000
 ```
 
-Open `http://<host>:8000`. The UI shows scanner connection state, lets you load
-firmware, trigger a scan with a live progress bar (bytes received), upload or
-reprocess a `.raw` file, set frame count, and download individual frames or a
-zip of all frames as 16-bit TIFFs.
+Open `http://<host>:8000`. The UI shows scanner connection state, loads firmware,
+triggers a scan with a live progress bar, then runs the **two-stage minilab
+flow**:
 
-The server calls the compiled `pakon_probe` / `pakon_replay` binaries for
-hardware control and runs the Python image pipeline in a thread pool for processing.
-Build the C tools first (`cmake --build build`).
+1. **Process (prescan)** — builds the long negative ribbon once, caches it, and
+   renders a single long **preview strip** with auto-detected frame positions.
+2. **Confirm frames** — position each crop on the strip (click to place, **+Add /
+   −Remove**, keyboard **←/→** nudge, **↑/↓** prev/next, **Enter** next).
+3. **Export** — only the confirmed crops are cropped at full resolution and run
+   through the C-41 inversion + `rpd.pf` render. Download per-frame raw negative
+   / TIFF / JPEG, a zip of any format, or a JPEG contact sheet.
+
+The server calls the compiled `pakon_probe` / `pakon_replay` binaries for hardware
+control and runs the Python image pipeline in a thread pool. Build the C tools
+first (`cmake --build build`). The `rpd.pf` profile (in `profiles/`) is used for
+the rendered JPEGs.
 
 ## Firmware
 
