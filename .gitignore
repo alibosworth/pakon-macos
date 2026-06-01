@@ -31,3 +31,6 @@ __pycache__/
 # to redistribute). Findings are folded into docs/PROTOCOL.md instead.
 /pakon-scanning-software/
 /re/
+
+# local python venv for the image tools
+/.venv/

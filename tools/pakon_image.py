@@ -52,6 +52,176 @@ import tempfile
 import numpy as np
 
 
+# --- OEM C-41 negative→positive inversion (recovered from PakonIMAu.dll) -------
+# The original Kodak/Pakon software inverts colour negatives via the "ColNeg"
+# path (PIColorCorrectColNegPlanarScan), driven by two data files in
+# Config/ColorCorrection/:
+#   1. _ClientColNegLut.txt — a single shared 14-bit log-density curve. Fit
+#      exactly (0 error over all 16384 entries):  out = 3500*log10(16383/in),
+#      in=0 -> 16383. This is the tonal flip (density = log10(ref/signal)).
+#   2. _ClientColNegMat.txt — a 3x3 + offset dye-crosstalk / orange-mask colour
+#      matrix (applied to the inverted positive).
+# The OEM scanner's AGC put the clear film base near full-scale before this LUT;
+# our raw is not exposure-normalised, so we first normalise each channel by its
+# measured film base (Dmin) — this is the per-channel mask removal. The OEM's
+# final output-colourspace step (srgb.pf) is the sRGB transfer function, applied
+# here for a directly-viewable positive.
+_C41_MAT = np.array([[1.11882, -0.10130, -0.01161],
+                     [-0.20096, 1.10082, 0.11698],
+                     [-0.11657, 0.04834, 1.08274]], dtype=np.float32)
+_C41_OFF = np.array([-82.60334, -586.90975, -707.78706], dtype=np.float32)
+
+
+def _c41_lut():
+    """OEM ColNeg shared log-density LUT: out = 3500*log10(16383/in)."""
+    ii = np.arange(16384, dtype=np.float64)
+    out = np.where(ii < 1.0, 16383.0,
+                   3500.0 * np.log10(16383.0 / np.maximum(ii, 1.0)))
+    return np.clip(out, 0.0, 16383.0).astype(np.float32)
+
+
+def _srgb_encode(x01):
+    """sRGB transfer function (the OEM srgb.pf output colourspace), x in [0,1]."""
+    a = 0.055
+    return np.where(x01 <= 0.0031308, x01 * 12.92,
+                    (1.0 + a) * np.power(np.clip(x01, 0.0, 1.0), 1.0 / 2.4) - a)
+
+
+_G_OF_POS = {0: "b", 1: "r", 2: "g"}  # global chans label of each interleave pos
+
+
+def _zone_band_bases(chans, c0, c1, sat, pct, nwin, winrows):
+    """Per-window per-position film-base percentiles for a zone. Measured on
+    *local* row-bands, NOT the whole roll: the orange film-base signal is clean
+    in any given band (R>>B), but a whole-roll percentile is dominated by blown
+    neutral highlights (~saturation, R≈G≈B) which destroy the ranking."""
+    n = chans["b"].shape[0]
+    bands = []
+    for w in range(nwin):
+        r0 = int((w + 0.5) / nwin * n)
+        r1 = min(n, r0 + winrows)
+        b = {}
+        for pos, gname in _G_OF_POS.items():
+            col = chans[gname][r0:r1, c0:c1].ravel().astype(np.float32)
+            m = col[col < sat]
+            b[pos] = float(np.percentile(m if m.size else col, pct))
+        bands.append(b)
+    return bands
+
+
+def detect_zone_perm(chans, c0, c1, sat=63000, pct=99.5, nwin=8, winrows=1500):
+    """Auto-detect a zone's R/G/B channel identity using the C-41 orange film
+    base as physical ground truth.
+
+    The clearest film (rebate / deep shadows) is most transmissive in RED (the
+    orange mask passes red, blocks blue), so ranking the three interleave
+    positions by their per-position film base gives R (highest) > G > B
+    (lowest). The order is a fixed CCD-tap property of the zone, so it is
+    measured per local band and **majority-voted** for robustness (blown frames
+    that read neutral are outvoted). Replaces hardcoded channel orders (which
+    were scan/zone-specific and produced a purple cast / mismatched-cast seam
+    when wrong).
+
+    Returns (perm, bases_by_pos): perm maps output r/g/b -> the global `chans`
+    key; bases_by_pos is the median {pos: base} for logging."""
+    from collections import Counter
+    bands = _zone_band_bases(chans, c0, c1, sat, pct, nwin, winrows)
+    votes = [tuple(sorted(b, key=lambda p: b[p], reverse=True)) for b in bands]
+    order = Counter(votes).most_common(1)[0][0]  # (R_pos, G_pos, B_pos)
+    perm = {"r": _G_OF_POS[order[0]], "g": _G_OF_POS[order[1]],
+            "b": _G_OF_POS[order[2]]}
+    med = {pos: float(np.median([b[pos] for b in bands])) for pos in (0, 1, 2)}
+    return perm, med
+
+
+def measure_dmin(rgb16, pct=99.5, sat=63000, nwin=12, winrows=1500):
+    """Per-channel film base (Dmin) = the clear/brightest point of the negative,
+    used as the per-channel white point (dividing by it removes the orange mask
+    and white-balances).
+
+    Measured as the **median over local row-bands** of each channel's clipped
+    high percentile. A single whole-roll percentile is dominated by blown
+    neutral highlights (~saturation, R≈G≈B), which leaves the orange mask in
+    (warm/purple cast); local bands recover the true orange base (R > G > B).
+    Pixels at/above `sat` are excluded (clipped, no mask info). Raw 16-bit."""
+    n = rgb16.shape[0]
+    bands = []
+    for w in range(nwin):
+        r0 = int((w + 0.5) / nwin * n)
+        seg = rgb16[r0:min(n, r0 + winrows)].reshape(-1, 3).astype(np.float32)
+        bands.append([np.percentile(c[c < sat], pct) if (c < sat).any()
+                      else np.percentile(c, pct) for c in seg.T])
+    base = np.median(np.array(bands), axis=0).astype(np.float32)
+    return np.maximum(base, 1.0)
+
+
+def invert_c41(rgb16, base, lut, matrix="none", wb=False, srgb=True):
+    """Apply the OEM C-41 ColNeg inversion to a 16-bit RGB array (one frame).
+
+    `base` = per-channel Dmin (16-bit, from measure_dmin); `matrix` in
+    {none, post, pre} controls the crosstalk matrix; `wb` applies a per-frame
+    gray-world white balance; `srgb` applies the sRGB display encode. Returns
+    16-bit RGB positive.
+
+    The per-channel Dmin normalisation IS the white balance (white point = the
+    orange film base) and lands very close to the OEM's own rendering — verified
+    against the OEM reference scans of this roll. Gray-world (`wb`) is therefore
+    OFF by default: it forces every scene neutral, stripping intentional warmth
+    (tungsten/sunset) and leaving a blue lean. The OEM crosstalk matrix is also
+    off: its offsets (−82/−586/−707) suit the OEM's pre-balanced scale and
+    over-subtract G/B here (extreme red)."""
+    in14 = np.clip(rgb16.astype(np.float32) / base * 16383.0, 0.0, 16383.0)
+    if matrix == "pre":
+        in14 = np.clip(in14 @ _C41_MAT.T + _C41_OFF, 0.0, 16383.0)
+    pos = lut[in14.astype(np.uint16)]
+    if matrix == "post":
+        pos = np.clip(pos @ _C41_MAT.T + _C41_OFF, 0.0, 16383.0)
+    if wb:
+        # Gray-world: scale each channel so its median matches the luma median.
+        # Median (not mean) + clamped gains keep colour-dominant scenes sane.
+        med = np.median(pos.reshape(-1, 3), axis=0)
+        gain = np.clip(med.mean() / np.maximum(med, 1.0), 0.6, 1.7)
+        pos = np.clip(pos * gain, 0.0, 16383.0)
+    if srgb:
+        pos = _srgb_encode(pos / 16383.0) * 16383.0
+    return np.clip(pos * 4.0, 0.0, 65535.0).astype(np.uint16)
+
+
+def render_jpeg(rgb16_srgb, rpd_path, gamma=1.5, lo_p=0.5, hi_p=99.7, knee=0.85):
+    """Render the OEM "vibrant JPEG" look from our sRGB-encoded C-41 positive.
+
+    Reproduces the OEM's JPEG export options (PSI "Other Options"):
+      1. **Color Correction (12-bit RPD)** — run through Kodak's `rpd.pf` ICC
+         rendering profile (`RPD_dls_3` + `yellow5` cascade) via littleCMS. This
+         is the accurate Kodak colour rendering.
+      2. **Color Scene Balance** — surrogate for the OEM SBA: per-channel
+         auto-levels (neutralise shadow+highlight ends) + a midtone gamma lift.
+    DIFFERENCE FROM OEM (deliberate improvement): the OEM blows out highlights;
+    we roll them off with a soft exponential shoulder above `knee`, so bright
+    areas keep detail instead of clipping to flat white.
+
+    Input is the same 16-bit sRGB frame written to the TIFF. Returns an 8-bit
+    (H,W,3) uint8 array. The plain TIFF stays the full-control, unrendered file."""
+    from PIL import Image, ImageCms
+    src = Image.fromarray((rgb16_srgb >> 8).astype(np.uint8), "RGB")
+    rpd = ImageCms.getOpenProfile(rpd_path)
+    srgb = ImageCms.createProfile("sRGB")
+    tr = ImageCms.buildTransform(rpd, srgb, "RGB", "RGB", renderingIntent=0)
+    a = np.asarray(ImageCms.applyTransform(src, tr)).astype(np.float32) / 255.0
+    out = np.empty_like(a)
+    for c in range(3):
+        ch = a[:, :, c]
+        lo, hi = np.percentile(ch, lo_p), np.percentile(ch, hi_p)
+        x = np.clip((ch - lo) / max(hi - lo, 1e-3), 0.0, None)
+        x = np.where(x <= 0, 0.0, x ** (1.0 / gamma))          # midtone lift
+        # soft highlight shoulder: compress (knee, inf) -> (knee, 1), no hard clip
+        x = np.where(x > knee,
+                     knee + (1 - knee) * (1 - np.exp(-(x - knee) / (1 - knee))),
+                     x)
+        out[:, :, c] = np.clip(x * 255.0, 0, 255)
+    return out.astype(np.uint8)
+
+
 def _vlead(ch, ref, rng=40, rowstep=1, colstep=3):
     """Vertical 'lead' of channel `ch` over `ref` in scan lines: the dy that
     maximizes corr(ch[row], ref[row+dy]). On this F-135 the sensor is trilinear
@@ -349,6 +519,10 @@ def main():
                     help="samples per scan line (default 8000)")
     ap.add_argument("--order", default="rgb",
                     help="channel order of the interleave (default rgb)")
+    ap.add_argument("--channel-order", default="auto", choices=["auto", "brg"],
+                    help="per-zone R/G/B identity: 'auto' detects it from the "
+                         "orange film base (default, robust); 'brg' forces the "
+                         "old hardcoded order")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     ap.add_argument("--frames", type=int, default=None,
                     help="split into N frames (default: auto-detect from valley count)")
@@ -375,6 +549,35 @@ def main():
                          "correct non-square raw pixels; for 35mm use 3000x2000")
     ap.add_argument("--invert", action="store_true",
                     help="quick linear positive (preview only; not real C-41)")
+    ap.add_argument("--invert-c41", action="store_true",
+                    help="OEM-faithful C-41 inversion (ColNeg log-density LUT + "
+                         "crosstalk matrix + sRGB encode, recovered from "
+                         "PakonIMAu.dll). Produces a viewable positive.")
+    ap.add_argument("--c41-matrix", default="none", choices=["none", "post", "pre"],
+                    help="where to apply the ColNeg crosstalk matrix (default "
+                         "none; the OEM matrix offsets over-subtract G/B in our "
+                         "scale and cause a red cast)")
+    ap.add_argument("--c41-wb", action=argparse.BooleanOptionalAction, default=False,
+                    help="per-frame gray-world white balance (default OFF; the "
+                         "Dmin normalisation already matches the OEM, and "
+                         "gray-world strips intentional scene warmth → blue lean)")
+    ap.add_argument("--c41-no-srgb", action="store_true",
+                    help="skip the sRGB display encode (leave in ColNeg density space)")
+    ap.add_argument("--c41-dmin-pct", type=float, default=99.5,
+                    help="per-channel film-base (Dmin) percentile (default 99.5)")
+    ap.add_argument("--jpeg", action="store_true",
+                    help="also write a rendered .jpg per frame (OEM 'vibrant' "
+                         "look: rpd.pf colour profile + scene-balance + highlight "
+                         "roll-off). Requires --invert-c41 and the RPD profile.")
+    ap.add_argument("--rpd-profile",
+                    default=os.path.join(os.path.dirname(__file__), "..",
+                                         "profiles", "rpd.pf"),
+                    help="path to Kodak rpd.pf ICC profile (default repo "
+                         "profiles/rpd.pf; extract from the OEM install)")
+    ap.add_argument("--jpeg-gamma", type=float, default=1.5,
+                    help="midtone lift for the JPEG render (default 1.5)")
+    ap.add_argument("--jpeg-quality", type=int, default=92,
+                    help="JPEG quality (default 92)")
     ap.add_argument("-o", "--out", default="frame",
                     help="output path prefix (default 'frame')")
     args = ap.parse_args()
@@ -386,6 +589,15 @@ def main():
             resize = (rw, rh)
         except ValueError:
             sys.exit("--resample-to must be WxH, e.g. 3000x2000")
+
+    rpd_path = os.path.abspath(args.rpd_profile)
+    if args.jpeg:
+        if not args.invert_c41:
+            sys.exit("--jpeg requires --invert-c41 (it renders the inverted positive)")
+        if not os.path.exists(rpd_path):
+            sys.exit(f"--jpeg needs the Kodak RPD profile; not found at "
+                     f"{rpd_path}\n  extract rpd.pf from the OEM install and pass "
+                     f"--rpd-profile, or place it at profiles/rpd.pf")
 
     raw = np.memmap(args.raw, dtype="<u2", mode="r")
     lw = args.linewidth
@@ -415,13 +627,26 @@ def main():
         zones = [z for z in [(ir1 + 1, width), (0, ir0)] if z[1] > z[0]]
         print(f"IR band: cols {ir0}-{ir1} (Digital ICE); visible zones "
               f"{zones}")
-        # Zone1 (before-IR) is read by the other CCD tap which outputs channels
-        # in a different order: pos0→G, pos1→B, pos2→R vs zone0's pos0→B, pos1→R,
-        # pos2→G. Confirmed by permutation sweep on fullroll.raw (seam_RGB winner).
-        zone_perms = [None, {"r": "g", "g": "b", "b": "r"}] if len(zones) == 2 else [None]
     else:
         zones = [(0, width)]
-        zone_perms = [None]
+
+    # Channel identity per zone. The CCD output taps emit R/G/B in a
+    # zone-specific order, so a single global order produces a colour cast (e.g.
+    # purple) on the mis-ordered zone. Default 'auto' detects each zone's order
+    # from the orange film base (detect_zone_perm); 'brg' forces the old
+    # hardcoded order (pos0=B,pos1=R,pos2=G + a fixed zone1 perm).
+    if args.channel_order == "auto":
+        zone_perms = []
+        for c0, c1 in zones:
+            perm, base = detect_zone_perm(chans, c0, c1)
+            ranked = sorted(base, key=lambda p: base[p], reverse=True)
+            print(f"channel-order: zone {c0}-{c1} pos-bases "
+                  f"{[int(base[p]) for p in (0, 1, 2)]} -> "
+                  f"R=pos{ranked[0]} G=pos{ranked[1]} B=pos{ranked[2]}")
+            zone_perms.append(perm)
+    else:
+        zone_perms = [None, {"r": "g", "g": "b", "b": "r"}][:len(zones)] \
+            if len(zones) == 2 else [None]
 
     if args.register:
         if args.reg_leads:
@@ -455,6 +680,16 @@ def main():
     if args.invert:
         rgb = rgb.max() - rgb
 
+    # OEM C-41 inversion: measure the film base (Dmin) once on the whole ribbon
+    # so every frame inverts against the same white point, then apply per-frame.
+    c41 = None
+    if args.invert_c41:
+        base = measure_dmin(rgb, pct=args.c41_dmin_pct)
+        c41 = (base, _c41_lut())
+        print(f"C-41 invert: Dmin (film base) R,G,B = "
+              f"{np.round(base).astype(int).tolist()}, matrix={args.c41_matrix}, "
+              f"sRGB={'no' if args.c41_no_srgb else 'yes'}")
+
     rot = (args.rotate // 90) % 4
 
     # Fixed-pitch frame grid (35mm frames are constant width, consistent pitch).
@@ -483,6 +718,9 @@ def main():
             r_end = min(rgb.shape[0], r_start + target_w)
             r_start = max(0, r_end - target_w)
         part = rgb[r_start:r_end]
+        if c41 is not None:
+            part = invert_c41(part, c41[0], c41[1], matrix=args.c41_matrix,
+                              wb=args.c41_wb, srgb=not args.c41_no_srgb)
         if rot:
             part = np.rot90(part, k=rot)
         part = np.ascontiguousarray(part)
@@ -493,7 +731,17 @@ def main():
         h_out = resize[1] if resize else part.shape[0]
         print(f"wrote {tif}  ({w_out}x{h_out}, 16-bit RGB"
               f"{' resampled' if resize else ''}"
-              f"{' inverted' if args.invert else ' raw/negative'})")
+              f"{' C-41 positive' if c41 is not None else (' inverted' if args.invert else ' raw/negative')})")
+        if args.jpeg:
+            from PIL import Image
+            rendered = render_jpeg(part, rpd_path, gamma=args.jpeg_gamma)
+            im = Image.fromarray(rendered, "RGB")
+            if resize:
+                im = im.resize(resize, Image.LANCZOS)
+            jpg = f"{args.out}{suffix}.jpg"
+            im.save(jpg, quality=args.jpeg_quality)
+            print(f"wrote {jpg}  ({im.width}x{im.height}, rendered JPEG: "
+                  f"RPD profile + scene-balance + highlight roll-off)")
 
 
 if __name__ == "__main__":
