@@ -78,6 +78,16 @@ extern "C" {
 #define PAKON_EXPOSURE_MAX        0xfffu  /* 12-bit exposure clamp */
 #define PAKON_EXPOSURE_MIN        0x0du   /* OEM minimum (post-regression clamp) */
 
+/*
+ * Stream-prime before the gain phase: a few discarded acquisitions to get the
+ * readout flowing after the exposure/control writes (the open-gate level is
+ * stable immediately on this hardware — there is no slow lamp ramp — so this is
+ * just priming, not a warm-up wait). Exits early if a channel peak crosses
+ * WARMUP_BRIGHT.
+ */
+#define PAKON_CALIB_WARMUP_BRIGHT 30000u  /* early-exit level */
+#define PAKON_CALIB_WARMUP_MAX    2u      /* priming rounds (× nlines) */
+
 /* ---- pure helpers (no hardware; unit-tested) ------------------------------ */
 
 /*

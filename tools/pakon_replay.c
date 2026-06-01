@@ -909,6 +909,112 @@ static int do_calibrate(unsigned timeout, size_t nlines, int verbose,
     return 0;
 }
 
+/* ---- read the cached calibration / param table (0xA4/0xA9) ----------------
+ *
+ * The OEM reads a parameter table over EP0 at session start: a 0xA4 trigger
+ * (wValue=0x00a5, wIndex=0x1234) then a 0xA9 IN read (wValue=offset,
+ * wIndex=0x1234) per chunk. Per the operator's observation that TLX only
+ * calibrates slowly the first time and reuses the result after, this table is
+ * the scanner's PERSISTED (EEPROM) calibration. We dump it so we can locate the
+ * gain/offset/exposure/lamp fields and drive the backend from the cache instead
+ * of reproducing a live open-gate calibration. Offsets/lengths mirror the
+ * capture (scan.pakscan). */
+static int do_read_params(unsigned timeout, const char *outpath)
+{
+    struct { uint16_t off, len; } chunks[] = {
+        {0x0000,0x08},{0x0008,0x20},{0x0028,0x20},{0x0048,0x20},{0x0068,0x20},
+        {0x0088,0x20},{0x00a8,0x20},{0x00c8,0x20},{0x00e8,0x20},{0x0108,0x20},
+        {0x0128,0x20},{0x0148,0x20},{0x0168,0x20},{0x0188,0x06},
+        {0x0800,0x08},{0x0808,0x1c},
+    };
+    size_t nchunks = sizeof(chunks)/sizeof(chunks[0]);
+
+    pakon_ctx *ctx = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK) { fprintf(stderr, "init failed\n"); return 1; }
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open device failed: %s (need operational f135)\n",
+                pakon_result_str(r));
+        pakon_usb_exit(ctx); return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev); pakon_usb_exit(ctx); return 1;
+    }
+    /* open handshake to Idle (the table read follows it in the capture) */
+    for (size_t i = 0; i < sizeof(OPEN_SEQ)/sizeof(OPEN_SEQ[0]); i++) {
+        const open_step *s = &OPEN_SEQ[i];
+        pakon_packet cmd, reply;
+        pakon_packet_build(&cmd, s->out[0], s->out + 2, s->out[1]);
+        pakon_cmd(dev, &cmd, &reply, timeout);
+    }
+
+    /* Assemble into a sparse buffer indexed by offset (covers up to 0x824). */
+    static uint8_t table[0x900];
+    static uint8_t valid[0x900];
+    memset(table, 0, sizeof(table)); memset(valid, 0, sizeof(valid));
+    unsigned errs = 0;
+    for (size_t i = 0; i < nchunks; i++) {
+        size_t got = 0;
+        /* trigger */
+        pakon_usb_control(dev, 0x40, 0xa4, 0x00a5, 0x1234, NULL, 0, &got, timeout);
+        /* read chunk at its offset */
+        uint8_t tmp[64];
+        r = pakon_usb_control(dev, 0xc0, 0xa9, chunks[i].off, 0x1234,
+                              tmp, chunks[i].len, &got, timeout);
+        if (r != PAKON_OK) { errs++; continue; }
+        for (size_t b = 0; b < got && chunks[i].off + b < sizeof(table); b++) {
+            table[chunks[i].off + b] = tmp[b];
+            valid[chunks[i].off + b] = 1;
+        }
+    }
+
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+
+    /* annotated hexdump of the valid bytes */
+    printf("=== param table (%zu chunks, %u read errors) ===\n", nchunks, errs);
+    for (size_t off = 0; off < sizeof(table); off += 16) {
+        int any = 0;
+        for (int b = 0; b < 16; b++) if (valid[off+b]) { any = 1; break; }
+        if (!any) continue;
+        printf("%04zx:", off);
+        for (int b = 0; b < 16; b++)
+            valid[off+b] ? printf(" %02x", table[off+b]) : printf(" --");
+        printf("  ");
+        for (int b = 0; b < 16; b++) {
+            uint8_t c = table[off+b];
+            putchar(valid[off+b] && c >= 0x20 && c < 0x7f ? c : '.');
+        }
+        printf("\n");
+    }
+
+    /* flag the OEM seed values so the fields are easy to spot */
+    printf("\n=== candidate field locations (16-bit LE matches of OEM seeds) ===\n");
+    struct { const char *name; uint16_t v; } seeds[] = {
+        {"Gain=0x000d (13)", 0x000d}, {"Offset_R=0x0133 (-51 sm)", 0x0133},
+        {"Offset_G=0x012a (-42)", 0x012a}, {"Offset_B=0x012b (-43)", 0x012b},
+        {"Height=0x0c1a", 0x0c1a},
+    };
+    for (size_t s = 0; s < sizeof(seeds)/sizeof(seeds[0]); s++) {
+        for (size_t off = 0; off + 1 < sizeof(table); off++) {
+            if (!valid[off] || !valid[off+1]) continue;
+            uint16_t v = (uint16_t)(table[off] | (table[off+1] << 8));
+            if (v == seeds[s].v)
+                printf("  %-26s @ 0x%04zx\n", seeds[s].name, off);
+        }
+    }
+
+    if (outpath) {
+        FILE *f = fopen(outpath, "wb");
+        if (f) { fwrite(table, 1, sizeof(table), f); fclose(f);
+                 printf("\nraw table written to %s (0x%zx bytes)\n", outpath, sizeof(table)); }
+    }
+    return errs ? 1 : 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -917,6 +1023,7 @@ static void usage(const char *argv0)
         "       %s --scan-sm FILE [--image OUT] [--max-mb N]  poll-driven scan\n"
         "       %s --open                                verify open handshake\n"
         "       %s --calibrate [--cal-lines N] [--cal-verbose]  driven calibration\n"
+        "       %s --read-params [--params-out FILE]      dump cached calibration table\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -942,16 +1049,17 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
 {
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
-    int want_calibrate = 0, cal_verbose = 0;
+    int want_calibrate = 0, cal_verbose = 0, want_read_params = 0;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
     const char *cal_prelude = NULL;
+    const char *params_out = NULL;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -969,6 +1077,10 @@ int main(int argc, char **argv)
             want_open = 1;
         } else if (!strcmp(argv[i], "--calibrate")) {
             want_calibrate = 1;
+        } else if (!strcmp(argv[i], "--read-params")) {
+            want_read_params = 1;
+        } else if (!strcmp(argv[i], "--params-out") && i + 1 < argc) {
+            params_out = argv[++i];
         } else if (!strcmp(argv[i], "--cal-lines") && i + 1 < argc) {
             cal_lines = strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--prelude") && i + 1 < argc) {
@@ -1006,11 +1118,14 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!want_open && !want_calibrate && !scan_file && !scan_sm_file && !advance_file) {
+    if (!want_open && !want_calibrate && !want_read_params && !scan_file &&
+        !scan_sm_file && !advance_file) {
         usage(argv[0]);
         return 2;
     }
 
+    if (want_read_params)
+        return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
     if (want_calibrate)
         return do_calibrate(timeout, (size_t)cal_lines, cal_verbose, cal_prelude,
                             (unsigned)cal_exposure);

@@ -96,9 +96,60 @@ algorithm, (3) driven C backend.
     scan engine, not a static register.**
   - Side note: writing gain `0x3f` (max) zeroes the readout (AFE saturation quirk);
     harmless since real gain is ~13, but don't drive gain to 63.
+- **Milestone 3 GAIN bring-up session (2026-05-31, scanner on Mac) — findings:**
+  - Proved the hardware CAN make bright open-gate data: faithfully replaying the
+    OEM pre-motor preview (`--scan` of scan.pakscan lines 1–1717) ramps mean
+    3840→**54681** (max 65534, 46% of samples >40000). So illumination works.
+  - But our driven loop's open-gate level is stuck at **~7880 (gain 0)**, rising
+    only to ~8720 at gain 8. **Exposure reg 0x82.1/2/3 is NOT the brightness lever**
+    — swept 1024/2048/4095, all identical ~7880. The integration/brightness lever
+    is a different register the OEM sets in preview (candidates: reg 9 set to
+    0x14/0x17/0x313, the control bitmask value, height reg 6, or PICL 0x20
+    `8b/8c/8d/8f`,`d0/d1/80/89`). Gain alone (max 0x3f) can't bridge 7880→64000.
+  - **KEY (user/operator insight + decompile):** TLX calibration "takes a while
+    the FIRST time, not subsequent times" ⇒ calibration is **cached in EEPROM**
+    (decompile: `FN_GetCalibrateEEProm`/`PutCalibrateEEProm`, and the orchestrator's
+    "use-cached-calibration" path when recalibrate-flag clear). The slow first run =
+    the **thermal-stability wait** (`FUN_10028480`, 20-min timeout, Sleep(500) loop)
+    + full multi-phase calibrate. This reframes the goal: the scanner persists its
+    own calibration, so reading the **0xA4/0xA9 param table = the cached EEPROM
+    calibration** is likely the pragmatic, reproducible path (decode it instead of
+    reproducing the live bright-gate measurement).
+  - Tooling this session: `--prelude FILE`, `--cal-exposure N`, kick-per-read
+    `calib_acquire`, stream-prime, control-strobe (reg0=0x161) write. Dark phase
+    can read 0B when the device is left in a dirty state by a truncated `--scan`
+    (no teardown) — re-open/replug or run a clean teardown to reset.
+- **Milestone 3 → CACHED-CALIBRATION PATH chosen (operator steer) + table dumped
+  (2026-05-31).** `pakon_replay --read-params [--params-out FILE]` performs the OEM
+  0xA4-trigger / 0xA9-read sequence (wIndex 0x1234, offset in wValue) and dumps the
+  scanner's persisted (EEPROM) calibration. Read cleanly on hardware, 0 errors.
+  Structure decoded so far (dump saved to /tmp/params.bin this session):
+  - Two framed regions; each starts with `u32 length` then `u32 checksum`:
+    region 1 = 0x000..0x18e (len 0x18e), region 2 = 0x800..0x824 (len 0x24).
+  - Region-1 header ints: 0x0c=1350, 0x10=3054 (likely geometry/DPI). 0x18..0x9f =
+    opaque binary (NOT float32) — likely the **ColorMatrix** / per-channel blob.
+  - **Region 2 @0x808 = `(1000,1008) × 6` u16 pairs** — almost certainly the LED
+    **Current/Duty** per channel (the "Light" calibration).
+  - The raw gain/offset/exposure register values are NOT stored verbatim — this is
+    a serialized calibration record needing the OEM parser to map fields.
+  - **EEPROM schema found** (decompile TLC.c:11429 EEPromDebug.txt header):
+    `Current_R/G/B/Ir, Duty_R/G/B/Ir, IntegrationTime` + temps/RPMs; section
+    parsers `FN_bEEPromReadSection`, `FN_GetCalibrateInfo{ColorMatrix,Light,Dpi}`
+    (TLC.c ~22583+). 0xA4/0xA9 issued via TLC `FUN_1001db50` / TLA `FUN_1001ac60`.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — unblock the GAIN phase: get open-gate illumination.** Dark-offset
+**Milestone 3 — decode the cached-calibration table sections.** The table is read
+(`pakon_replay --read-params`); now map its fields by tracing the OEM parser in the
+decompile: `FN_bEEPromReadSection` + `FN_GetCalibrateInfoColorMatrix/Light/Dpi`
+(TLC.c ~22583+, and the 0xA9 reader `FUN_1001db50`/`FUN_1001ac60`). Goal: extract
+ColorMatrix (region 1 float blob), Light = LED Current/Duty (region 2 (1000,1008)×6)
+and IntegrationTime, and geometry (1350/3054). Then drive the backend CONFIGURE from
+these cached values instead of a live open-gate calibration. The live-calibration
+gain/offset path stays as a fallback (dark-offset already works on hardware).
+
+(Superseded sub-goal: the live GAIN phase is blocked on open-gate illumination — the
+brightness lever is some register other than exposure 0x82.1/2/3; deprioritized in
+favour of the cached-calibration path.) Dark-offset
 is done & hardware-validated. The gain loop needs the open-gate white (~48900) the
 OEM sees, but the F-135 lamp does not come on from static register writes. Two
 avenues (the scanner connects directly to the Mac now — no SSH/sudo):
