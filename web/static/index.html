@@ -308,6 +308,25 @@
         <option value="270">270°</option>
       </select>
     </label>
+    <label class="field" title="Interleave phase — fixed by the scan/replay mode, not the film">
+      Colour
+      <select id="order">
+        <option value="012" selected>36-exp</option>
+        <option value="120">Legacy</option>
+        <option value="201">Phase 2</option>
+      </select>
+    </label>
+    <label class="field" title="Density (log) inversion removes the C-41 orange-mask floor that lifts shadows; linear is the older flat inversion">
+      Invert
+      <select id="invert">
+        <option value="density" selected>Density</option>
+        <option value="linear">Linear</option>
+      </select>
+    </label>
+    <label class="field" title="Keep this % of the frame centre; trims the edge rebate/gap band. 100 = full frame">
+      Crop %
+      <input type="number" id="crop" value="100" min="50" max="100" step="1">
+    </label>
     <label class="field">
       Resample
       <input type="text" id="resample" placeholder="e.g. 3000x2000">
@@ -325,7 +344,13 @@
 <div class="card hidden" id="frames-section">
   <div class="frames-header">
     <h2 id="frames-title">Frames</h2>
-    <button class="ghost" id="export-btn">Export all (.zip)</button>
+    <div class="row">
+      <span class="msg">Export:</span>
+      <button class="ghost" id="export-raw">Raw TIFFs</button>
+      <button class="ghost" id="export-tiff">Inverted TIFFs</button>
+      <button class="ghost" id="export-jpeg">Inverted JPEGs</button>
+      <button class="ghost" id="clear-btn" style="border-color: var(--red); color: var(--red);">Clear</button>
+    </div>
   </div>
   <div class="frames-grid" id="frames-grid"></div>
 </div>
@@ -579,6 +604,9 @@
     const fd = new FormData();
     fd.append('frames',  $('frames').value);
     fd.append('rotate',  $('rotate').value);
+    fd.append('order',   $('order').value);
+    fd.append('invert',  $('invert').value);
+    fd.append('crop',    $('crop').value);
     const rs = $('resample').value.trim();
     if (rs) fd.append('resample', rs);
     if (uploadFile) fd.append('file', uploadFile);
@@ -619,16 +647,41 @@
              alt="Frame ${index}" loading="lazy">
         <div class="frame-footer">
           <span class="frame-num">Frame ${index}</span>
-          <a href="/api/frames/${index}/tiff"
-             download="frame_${n2}.tif">Download TIFF</a>
+          <span>
+            <a href="/api/frames/${index}/raw"  download="frame_${n2}_raw.tif">raw</a>
+            &nbsp;·&nbsp;
+            <a href="/api/frames/${index}/tiff" download="frame_${n2}.tif">TIFF</a>
+            &nbsp;·&nbsp;
+            <a href="/api/frames/${index}/jpeg" download="frame_${n2}.jpg">JPG</a>
+          </span>
         </div>`;
       grid.appendChild(card);
     }
   }
 
   // ── Export zip ───────────────────────────────────────────────────────────
-  $('export-btn').addEventListener('click', () => {
-    window.location = '/api/export';
+  $('export-raw').addEventListener('click',  () => window.location = '/api/export?fmt=raw');
+  $('export-tiff').addEventListener('click', () => window.location = '/api/export?fmt=tiff');
+  $('export-jpeg').addEventListener('click', () => window.location = '/api/export?fmt=jpeg');
+
+  // ── Clear current scan + temp files ────────────────────────────────────────
+  $('clear-btn').addEventListener('click', async () => {
+    if (!confirm('Clear the current scan and delete decoded temp files?\n'
+                 + '(A scan.raw saved to your output folder is kept.)')) return;
+    await fetch('/api/clear', { method: 'POST' });
+    $('frames-section').classList.add('hidden');
+    $('frames-grid').innerHTML = '';
+    $('frames-title').textContent = 'Frames';
+    $('raw-name').textContent = 'No file — run a scan or upload a .raw file';
+    $('raw-name').classList.remove('set');
+    $('proc-btn').disabled = true;
+    hasScanFile = false;
+    uploadFile = null;
+    $('raw-upload').value = '';
+    setMsg($('proc-msg'), '');
+    setMsg($('scan-msg'), '');
+    $('proc-prog-wrap').classList.remove('show');
+    $('scan-prog-wrap').classList.remove('show');
   });
 </script>
 </body>

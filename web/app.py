@@ -41,7 +41,7 @@ _RES = Path(os.environ.get("PAKON_RESOURCES", str(_REPO / "resources")))
 PROBE_BIN  = _BUILD / "pakon_probe"
 REPLAY_BIN = _BUILD / "pakon_replay"
 PAKFW      = _RES / "f135.pakfw"
-PAKSCAN    = _RES / "scan_fullroll.pakscan"
+PAKSCAN    = _RES / "36frames.pakscan"
 
 # ── App & state ───────────────────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ app = FastAPI(title="Pakon Scanner")
 _executor = ThreadPoolExecutor(max_workers=1)
 _state: dict = {
     "scan_path": None,   # Path to the last .raw file
-    "out_dir": WORK_DIR, # host dir the next scan writes scan.raw into
+    "out_dir": Path.home(), # host dir the next scan writes scan.raw into
     "frames": [],        # list of {"index", "tiff", "thumb"}
     "processing": False,
 }
@@ -183,7 +183,7 @@ async def _scan_stream(out_dir: Path):
 
 @app.post("/api/scan")
 async def api_scan(out_dir: str | None = Body(default=None, embed=True)):
-    target = Path(out_dir).expanduser() if out_dir else WORK_DIR
+    target = Path(out_dir).expanduser() if out_dir else Path.home()
     return StreamingResponse(_scan_stream(target), media_type="text/event-stream",
                              headers=_SSE_HEADERS)
 
@@ -241,6 +241,9 @@ async def api_process(
     frames: int = Form(default=0),   # 0 = auto-detect from the frame grid
     rotate: int = Form(default=90),
     resample: str = Form(default=""),
+    order: str = Form(default="012"),  # interleave phase; "012" = 36-exp replay
+    invert: str = Form(default="density"),  # "density" (log) or "linear"
+    crop: float = Form(default=100.0),  # centre-crop %, 100 = full frame
 ):
     if _state["processing"]:
         async def _busy():
@@ -288,7 +291,9 @@ async def api_process(
     def _run() -> None:
         try:
             result = decode_raw(raw_path, n_frames=frames, rotate=rotate,
-                                resample=resample_size, progress=_progress)
+                                resample=resample_size, base_order=order,
+                                invert_mode=invert, crop_pct=crop,
+                                progress=_progress)
             _state["frames"] = result
             loop.call_soon_threadsafe(
                 queue.put_nowait, {"type": "done", "count": len(result)}
@@ -321,48 +326,113 @@ async def api_frames():
     return [{"index": f["index"]} for f in _state["frames"]]
 
 
+def _frame_file(n: int, key: str):
+    """Return the Path for frame n's artifact `key`, or None if missing."""
+    match = next((f for f in _state["frames"] if f["index"] == n), None)
+    if not match:
+        return None
+    path = match.get(key)
+    return path if path and path.exists() else None
+
+
 @app.get("/api/frames/{n}/thumb")
 async def api_thumb(n: int):
-    match = next((f for f in _state["frames"] if f["index"] == n), None)
-    if not match or not match["thumb"].exists():
+    path = _frame_file(n, "thumb")
+    if not path:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(match["thumb"], media_type="image/png")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.get("/api/frames/{n}/tiff")
 async def api_tiff(n: int):
-    match = next((f for f in _state["frames"] if f["index"] == n), None)
-    if not match or not match["tiff"].exists():
+    """Inverted positive TIFF (16-bit)."""
+    path = _frame_file(n, "tiff")
+    if not path:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(
-        match["tiff"],
-        media_type="image/tiff",
-        filename=f"frame_{n:02d}.tif",
-    )
+    return FileResponse(path, media_type="image/tiff", filename=f"frame_{n:02d}.tif")
+
+
+@app.get("/api/frames/{n}/raw")
+async def api_raw(n: int):
+    """Raw negative TIFF (16-bit, as scanned)."""
+    path = _frame_file(n, "raw_tiff")
+    if not path:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="image/tiff",
+                        filename=f"frame_{n:02d}_raw.tif")
+
+
+@app.get("/api/frames/{n}/jpeg")
+async def api_jpeg(n: int):
+    """Inverted positive JPEG (8-bit)."""
+    path = _frame_file(n, "jpg")
+    if not path:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="image/jpeg", filename=f"frame_{n:02d}.jpg")
 
 
 # ── Zip export ────────────────────────────────────────────────────────────────
 
+# fmt -> (state key, file extension, archived name suffix)
+_EXPORT_FMTS = {
+    "raw":  ("raw_tiff", "tif", "_raw"),  # raw negative TIFF (16-bit)
+    "tiff": ("tiff",     "tif", ""),      # inverted positive TIFF (16-bit)
+    "jpeg": ("jpg",      "jpg", ""),      # inverted positive JPEG (8-bit)
+}
+
+
 @app.get("/api/export")
-async def api_export():
+async def api_export(fmt: str = "tiff"):
     frames = _state["frames"]
     if not frames:
         return JSONResponse({"error": "no frames to export"}, status_code=404)
 
-    zip_path = WORK_DIR / "export.zip"
+    fmt = fmt.lower()
+    if fmt not in _EXPORT_FMTS:
+        return JSONResponse({"error": f"unknown format: {fmt}"}, status_code=400)
+    state_key, ext, suffix = _EXPORT_FMTS[fmt]
+
+    zip_path = WORK_DIR / f"export_{fmt}.zip"
 
     def _make_zip() -> Path:
         with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
             for f in frames:
-                zf.write(str(f["tiff"]), f"frame_{f['index']:02d}.tif")
+                path = f.get(state_key)
+                if path and path.exists():
+                    zf.write(str(path), f"frame_{f['index']:02d}{suffix}.{ext}")
         return zip_path
 
     await asyncio.get_event_loop().run_in_executor(None, _make_zip)
     return FileResponse(
         zip_path,
         media_type="application/zip",
-        filename="pakon_frames.zip",
+        filename=f"pakon_frames_{fmt}.zip",
     )
+
+
+# ── Clear / cleanup ─────────────────────────────────────────────────────────────
+
+@app.post("/api/clear")
+async def api_clear():
+    """Reset the current scan and delete temp artifacts under WORK_DIR.
+
+    Only files inside WORK_DIR (/tmp/pakon_web) are removed — a scan.raw saved
+    into a user-chosen output directory is left untouched.
+    """
+    removed = 0
+    if WORK_DIR.exists():
+        for p in WORK_DIR.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+    _state["scan_path"] = None
+    _state["frames"] = []
+    _state["processing"] = False
+    return {"cleared": removed}
 
 
 # ── Static files (must be last) ───────────────────────────────────────────────

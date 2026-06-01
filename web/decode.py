@@ -32,24 +32,42 @@ WORK_DIR = Path("/tmp/pakon_web")
 _LINEWIDTH = 8000
 
 
-def _preview_png(part16, out_path, maxdim: int = 600) -> None:
-    """Write a viewable PNG preview from a 16-bit RGB negative.
+def _invert16(part16, mode: str = "density"):
+    """Negative→positive as 16-bit RGB.
 
-    Basic positive: per-channel percentile stretch then invert. This is a
-    *preview only* — it ignores the C-41 orange mask, so colour is approximate
-    (same caveat as `pakon_image.py --invert`). The TIFF keeps the raw negative.
+    `mode="density"` (default): invert in density (log) space —
+    ``d = log10(max/transmission)``, then a per-channel black/white stretch in
+    density. The C-41 orange mask is a per-channel *density* offset, so removing
+    it there yields neutral shadows. A linear inversion leaves that offset as a
+    warm floor that glows through the shadows of dark scenes (the "light bleed"),
+    identical on every frame because the mask is the same on every frame.
+
+    `mode="linear"`: the older per-channel linear stretch + invert. Kept for
+    comparison; warm in the shadows of dark frames.
+
+    Percentiles are measured on a subsample for speed, applied at full res.
     """
-    step = max(1, max(part16.shape[0] // maxdim, part16.shape[1] // maxdim))
-    sub = part16[::step, ::step].astype(np.float32)
-    out = np.empty(sub.shape, np.uint8)
-    for c in range(3):
-        ch = sub[..., c]
-        lo, hi = np.percentile(ch, (0.5, 99.5))
-        if hi <= lo:
-            hi = lo + 1.0
-        norm = np.clip((ch - lo) / (hi - lo), 0.0, 1.0)
-        out[..., c] = ((1.0 - norm) * 255.0).astype(np.uint8)  # invert
-    Image.fromarray(out).save(str(out_path), "PNG")
+    f = part16.astype(np.float32)
+    out = np.empty(f.shape, np.float32)
+
+    if mode == "linear":
+        sub = f[::4, ::4]
+        for c in range(3):
+            lo, hi = np.percentile(sub[..., c], (0.5, 99.5))
+            if hi <= lo:
+                hi = lo + 1.0
+            out[..., c] = 1.0 - np.clip((f[..., c] - lo) / (hi - lo), 0.0, 1.0)
+    else:
+        mx = float(f.max()) or 1.0
+        d = np.log10(np.clip(mx / np.clip(f, 1.0, None), 1.0, None))
+        sub = d[::4, ::4]
+        for c in range(3):
+            lo, hi = np.percentile(sub[..., c], (1.0, 99.5))
+            if hi <= lo:
+                hi = lo + 1e-6
+            out[..., c] = np.clip((d[..., c] - lo) / (hi - lo), 0.0, 1.0)
+
+    return (out * 65535.0).astype(np.uint16)
 
 
 def decode_raw(
@@ -57,6 +75,9 @@ def decode_raw(
     n_frames: int | None = None,
     rotate: int = 90,
     resample: tuple[int, int] | None = None,
+    base_order: str = "012",
+    invert_mode: str = "density",
+    crop_pct: float = 100.0,
     progress=None,
 ) -> list[dict]:
     """
@@ -71,6 +92,12 @@ def decode_raw(
         n_frames:  frames to split into; None / <=1 = auto-detect from the grid
         rotate:    degrees CW to rotate each frame (0 / 90 / 180 / 270)
         resample:  optional (width, height) to resample output via ImageMagick
+        base_order: interleave phase — the raw sample positions (mod 3) that map
+                    to R,G,B. Different scan/replay modes frame their data at a
+                    different phase, cyclically rotating the colour channels.
+                    "012" matches the 36-exposure replay; "120" the earlier
+                    F-135 captures (legacy B,R,G). Whichever phase is chosen, the
+                    inter-zone (dual-tap) relative permutation is unchanged.
         progress:  optional callable(step: str, pct: float 0–1)
 
     Returns:
@@ -89,11 +116,15 @@ def decode_raw(
     lines = raw.size // lw
     img = raw[: lines * lw].reshape(lines, lw)
     n3 = (lw // 3) * 3
-    # Interleave order confirmed as B=0, R=1, G=2 on this F-135.
+    # Interleave phase: which raw sample position (mod 3) carries R, G, B. Fixed
+    # by the scan/replay mode, not the film (see base_order docstring).
+    if len(base_order) != 3 or set(base_order) != set("012"):
+        base_order = "012"
+    pr, pg, pb = (int(d) for d in base_order)
     chans = {
-        "r": img[:, 1:n3:3],
-        "g": img[:, 2:n3:3],
-        "b": img[:, 0:n3:3],
+        "r": img[:, pr:n3:3],
+        "g": img[:, pg:n3:3],
+        "b": img[:, pb:n3:3],
     }
     sampled = [chans[c][::997] for c in ("r", "g", "b")]
     full = float(max(a.max() for a in sampled)) or 1.0
@@ -162,18 +193,36 @@ def decode_raw(
             r_end = min(rgb.shape[0], r_start + target_w)
             r_start = max(0, r_end - target_w)
         part = rgb[r_start:r_end]
+        # Optional centre crop: keep the central crop_pct of each axis, trimming
+        # the frame-edge rebate/gap band that can leak in. 100 = no crop.
+        if crop_pct < 100.0:
+            frac = max(0.1, min(1.0, crop_pct / 100.0))
+            ph, pw = part.shape[:2]
+            ch, cw = int(ph * frac), int(pw * frac)
+            r0c, c0c = (ph - ch) // 2, (pw - cw) // 2
+            part = part[r0c:r0c + ch, c0c:c0c + cw]
         if rot_k:
             part = np.rot90(part, k=rot_k)
         part = np.ascontiguousarray(part)
 
-        tiff_path = WORK_DIR / f"frame_{i + 1:02d}.tif"
+        pos = _invert16(part, mode=invert_mode)              # 16-bit positive
+        pos8 = (pos >> 8).astype(np.uint8)          # 8-bit for JPEG/thumb
 
+        raw_tiff = WORK_DIR / f"frame_{i + 1:02d}_raw.tif"
+        pos_tiff = WORK_DIR / f"frame_{i + 1:02d}.tif"
+        jpg_path = WORK_DIR / f"frame_{i + 1:02d}.jpg"
+        thumb_path = WORK_DIR / f"thumb_{i + 1:02d}.jpg"
+
+        # Raw negative TIFF — 16-bit, as scanned (native resolution).
+        tifffile.imwrite(str(raw_tiff), part, photometric="rgb")
+
+        # Inverted positive TIFF + JPEG (resample-corrected if requested).
         if resample:
             rw, rh = resample
-            h, w, _ = part.shape
+            h, w, _ = pos.shape
             fd, tmp = tempfile.mkstemp(suffix=".rgb")
             os.close(fd)
-            part.astype(">u2").tofile(tmp)
+            pos.astype(">u2").tofile(tmp)
             try:
                 subprocess.run(
                     [
@@ -185,20 +234,25 @@ def decode_raw(
                         "-filter", "Lanczos",
                         "-resize", f"{rw}x{rh}!",
                         "-depth", "16",
-                        str(tiff_path),
+                        str(pos_tiff),
                     ],
                     check=True,
                 )
             finally:
                 os.unlink(tmp)
+            Image.fromarray(pos8).resize((rw, rh), Image.LANCZOS).save(
+                str(jpg_path), "JPEG", quality=92)
         else:
-            tifffile.imwrite(str(tiff_path), part, photometric="rgb")
+            tifffile.imwrite(str(pos_tiff), pos, photometric="rgb")
+            Image.fromarray(pos8).save(str(jpg_path), "JPEG", quality=92)
 
-        # PNG preview — inverted (negative→positive), max 600 px on longest side.
-        thumb_path = WORK_DIR / f"thumb_{i + 1:02d}.png"
-        _preview_png(part, thumb_path)
+        # Small grid thumbnail (max 600 px, inverted positive).
+        step = max(1, max(pos8.shape[0] // 600, pos8.shape[1] // 600))
+        Image.fromarray(pos8[::step, ::step]).save(
+            str(thumb_path), "JPEG", quality=85)
 
-        frames.append({"index": i + 1, "tiff": tiff_path, "thumb": thumb_path})
+        frames.append({"index": i + 1, "raw_tiff": raw_tiff,
+                       "tiff": pos_tiff, "jpg": jpg_path, "thumb": thumb_path})
 
     emit("Done", 1.0)
     return frames
