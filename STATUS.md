@@ -22,8 +22,16 @@ user-space stack with Ghidra (workspace in `re/`, git-ignored; findings in
   replay — encoding formula still TBD, per decision to leave advance as-is).
 - **Scan = producer/consumer ring buffer** (free-running overlapped bulk-IN read),
   stop on device end-signal not byte count — matches our end-of-roll-white autostop.
-- **NEXT: decompiling `PakonIMAu.dll`** for the C-41 orange-mask / density-space
-  inversion (open Q2) and to double-check interleave/trilinear geometry.
+- **`PakonIMAu.dll` decompiled — "the look" identified (open Q2 ANSWERED).** It's
+  Kodak's **Ansel minilab pipeline** (data-driven, ~48 ASCII LUT/param stages):
+  `filmLut → SCP (Dmin/orange-mask removal) → DSBA scene balance → flesh →
+  tone/contrast/lighting → gamut/colorspace → sRGB`. The C-41 inversion is the
+  **SCP `modifyDmin=true`** stage (per-channel base subtraction, density space) —
+  NOT naive max-raw. The "look" is the whole cascade, not the inversion. Full
+  write-up in `docs/IMAGING.md`. Also found a DX-barcode reader subsystem +
+  subsystem address map (see memory). Our `pakon_image.py` still ships raw
+  negatives (no inversion/render) — a Pakon-style SCP-Dmin mode would be the
+  natural next tool improvement.
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,

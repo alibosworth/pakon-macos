@@ -160,7 +160,9 @@ python3 tools/pakon_image.py fullroll.raw --rotate 90 --frames 24 --resample-to 
 
 Writes `frame_1.tif` … `frame_N.tif` as 16-bit RGB TIFFs — registered,
 autocropped raw negatives, orange mask intact. Feed them to Negative Lab Pro,
-darktable negadoctor, or similar for proper C-41 inversion.
+darktable negadoctor, or similar for proper C-41 inversion. (Note: that gives
+*a* look, not *the* Pakon look — the original software renders via Kodak's Ansel
+minilab pipeline; see `docs/IMAGING.md`.)
 
 The decoder automatically handles:
 - **Digital ICE IR channel** — a ~658 px neutral-grayscale band embedded in
