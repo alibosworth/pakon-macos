@@ -26,7 +26,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +50,7 @@ app = FastAPI(title="Pakon Scanner")
 _executor = ThreadPoolExecutor(max_workers=1)
 _state: dict = {
     "scan_path": None,   # Path to the last .raw file
+    "out_dir": WORK_DIR, # host dir the next scan writes scan.raw into
     "frames": [],        # list of {"index", "tiff", "thumb"}
     "processing": False,
 }
@@ -87,6 +88,7 @@ async def api_status():
         "state": _scanner_state(),
         "scan_file": sp.name if sp else None,
         "scan_bytes": sp.stat().st_size if sp and sp.exists() else 0,
+        "out_dir": str(_state["out_dir"]),
         "frame_count": len(_state["frames"]),
         "processing": _state["processing"],
     }
@@ -123,15 +125,26 @@ async def api_firmware():
 
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
-async def _scan_stream():
+async def _scan_stream(out_dir: Path):
     for path, label in [(REPLAY_BIN, "pakon_replay binary"), (PAKSCAN, "scan script")]:
         if not path.exists():
             yield _sse({"type": "error", "message": f"{label} not found: {path}"})
             return
 
-    WORK_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = WORK_DIR / "scan.raw"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        yield _sse({"type": "error",
+                    "message": f"cannot create output dir {out_dir}: {exc}"})
+        return
+    if not os.access(out_dir, os.W_OK):
+        yield _sse({"type": "error",
+                    "message": f"output dir not writable: {out_dir}"})
+        return
+
+    out_path = out_dir / "scan.raw"
     _state["scan_path"] = out_path
+    _state["out_dir"] = out_dir
     _state["frames"] = []
 
     # Remove stale output so size polling starts from 0.
@@ -140,6 +153,7 @@ async def _scan_stream():
 
     proc = await asyncio.create_subprocess_exec(
         str(REPLAY_BIN), "--scan", str(PAKSCAN), "--image", str(out_path),
+        "--autostop",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -161,16 +175,62 @@ async def _scan_stream():
     size = out_path.stat().st_size if out_path.exists() else 0
     mb = round(size / 1_048_576, 1)
     if proc.returncode == 0:
-        yield _sse({"type": "done", "bytes": size, "mb": mb})
+        yield _sse({"type": "done", "bytes": size, "mb": mb, "path": str(out_path)})
     else:
         yield _sse({"type": "error",
                     "message": f"scan failed (exit {proc.returncode})"})
 
 
 @app.post("/api/scan")
-async def api_scan():
-    return StreamingResponse(_scan_stream(), media_type="text/event-stream",
+async def api_scan(out_dir: str | None = Body(default=None, embed=True)):
+    target = Path(out_dir).expanduser() if out_dir else WORK_DIR
+    return StreamingResponse(_scan_stream(target), media_type="text/event-stream",
                              headers=_SSE_HEADERS)
+
+
+# ── Host directory browser (scan output location) ──────────────────────────────
+
+@app.get("/api/browse")
+async def api_browse(path: str | None = None):
+    """List subdirectories of a host directory, for picking a scan output dir."""
+    base = Path(path).expanduser() if path else Path.home()
+    try:
+        base = base.resolve()
+        if not base.is_dir():
+            base = Path.home().resolve()
+    except Exception:
+        base = Path.home().resolve()
+
+    try:
+        dirs = sorted(
+            (p.name for p in base.iterdir()
+             if p.is_dir() and not p.name.startswith(".")),
+            key=str.lower,
+        )
+    except PermissionError:
+        dirs = []
+
+    parent = str(base.parent) if base.parent != base else None
+    return {"path": str(base), "parent": parent, "dirs": dirs}
+
+
+@app.post("/api/mkdir")
+async def api_mkdir(path: str = Body(...), name: str = Body(...)):
+    """Create a new subdirectory under `path` on the host."""
+    base = Path(path).expanduser()
+    if not base.is_dir():
+        return JSONResponse({"error": f"not a directory: {base}"}, status_code=400)
+    name = name.strip()
+    if not name or "/" in name or name in (".", ".."):
+        return JSONResponse({"error": "invalid folder name"}, status_code=400)
+    new = base / name
+    try:
+        new.mkdir(exist_ok=False)
+    except FileExistsError:
+        return JSONResponse({"error": "folder already exists"}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"path": str(new)}
 
 
 # ── Process ───────────────────────────────────────────────────────────────────
@@ -178,7 +238,7 @@ async def api_scan():
 @app.post("/api/process")
 async def api_process(
     file: UploadFile | None = File(default=None),
-    frames: int = Form(default=36),
+    frames: int = Form(default=0),   # 0 = auto-detect from the frame grid
     rotate: int = Form(default=90),
     resample: str = Form(default=""),
 ):
@@ -266,7 +326,7 @@ async def api_thumb(n: int):
     match = next((f for f in _state["frames"] if f["index"] == n), None)
     if not match or not match["thumb"].exists():
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(match["thumb"], media_type="image/jpeg")
+    return FileResponse(match["thumb"], media_type="image/png")
 
 
 @app.get("/api/frames/{n}/tiff")

@@ -191,6 +191,55 @@
     .frame-footer a:hover { text-decoration: underline; }
 
     .hidden { display: none !important; }
+
+    /* ── Folder picker modal ── */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 50;
+    }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      width: min(560px, 92vw);
+      max-height: 80vh;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+    }
+    .modal-head h2 {
+      font-size: 0.8rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--muted); margin: 0;
+    }
+    .browse-path {
+      padding: 10px 20px; font-family: monospace; font-size: 0.8rem;
+      color: var(--text); border-bottom: 1px solid var(--border);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      direction: rtl; text-align: left;
+    }
+    .browse-list { overflow-y: auto; flex: 1; min-height: 120px; }
+    .browse-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 20px; font-size: 0.86rem; cursor: pointer;
+      border-bottom: 1px solid var(--bg);
+    }
+    .browse-item:hover { background: var(--surface2); }
+    .browse-item .ic { color: var(--accent); flex-shrink: 0; }
+    .browse-empty { padding: 16px 20px; color: var(--muted); font-size: 0.82rem; }
+    .modal-foot {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 20px; border-top: 1px solid var(--border);
+    }
+    .modal-foot .spacer { flex: 1; }
+    #browse-close {
+      padding: 2px 9px; font-size: 1rem; line-height: 1;
+    }
   </style>
 </head>
 <body>
@@ -220,6 +269,11 @@
 <!-- Scan (warm only) -->
 <div class="card hidden" id="scan-card">
   <h2>Scan</h2>
+  <div class="file-row" style="margin-bottom: 14px;">
+    <span class="msg">Output folder:</span>
+    <span class="file-name set" id="scan-out">…</span>
+    <button class="ghost" id="scan-out-btn">Choose…</button>
+  </div>
   <div class="row">
     <button id="scan-btn">Scan</button>
     <span class="msg" id="scan-msg"></span>
@@ -243,7 +297,7 @@
   <div class="row" style="margin-top: 14px;">
     <label class="field">
       Frames
-      <input type="number" id="frames" value="36" min="1" max="72">
+      <input type="number" id="frames" value="0" min="0" max="72" title="0 = auto-detect">
     </label>
     <label class="field">
       Rotate
@@ -274,6 +328,24 @@
     <button class="ghost" id="export-btn">Export all (.zip)</button>
   </div>
   <div class="frames-grid" id="frames-grid"></div>
+</div>
+
+<!-- Folder picker -->
+<div class="modal-backdrop hidden" id="browse-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Choose output folder (on scanner host)</h2>
+      <button class="ghost" id="browse-close">✕</button>
+    </div>
+    <div class="browse-path" id="browse-cur"></div>
+    <div class="browse-list" id="browse-list"></div>
+    <div class="modal-foot">
+      <button class="ghost" id="browse-new">New folder…</button>
+      <span class="spacer"></span>
+      <span class="msg err" id="browse-msg"></span>
+      <button id="browse-use">Use this folder</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -315,6 +387,8 @@
   // ── Status polling ───────────────────────────────────────────────────────
   let hasScanFile = false;
   let uploadFile = null;
+  let outDir = null;          // chosen scan output dir (on host)
+  let outDirInit = false;     // seeded from server default yet?
 
   async function pollStatus() {
     try {
@@ -333,6 +407,13 @@
 
       $('fw-card').classList.toggle('hidden', d.state !== 'cold');
       $('scan-card').classList.toggle('hidden', d.state !== 'warm');
+
+      // Seed the output folder from the server default once.
+      if (!outDirInit && d.out_dir) {
+        outDirInit = true;
+        outDir = d.out_dir;
+        $('scan-out').textContent = outDir;
+      }
 
       // If a scan file exists server-side and we haven't surfaced it yet
       if (d.scan_file && !hasScanFile && !uploadFile) {
@@ -384,7 +465,7 @@
     $('scan-prog').value = 0;
     hasScanFile = false;
 
-    await postSSE('/api/scan', {}, ev => {
+    await postSSE('/api/scan', { out_dir: outDir }, ev => {
       if (ev.type === 'progress') {
         $('scan-prog').value = ev.mb;
         $('scan-prog-label').textContent = `${ev.mb} MB received`;
@@ -394,7 +475,7 @@
         $('scan-prog-label').textContent = `Complete — ${ev.mb} MB`;
         setMsg($('scan-msg'), `Scan complete (${ev.mb} MB)`, 'ok');
         hasScanFile = true;
-        $('raw-name').textContent = 'scan.raw';
+        $('raw-name').textContent = ev.path || 'scan.raw';
         $('raw-name').classList.add('set');
         $('proc-btn').disabled = false;
       } else if (ev.type === 'error') {
@@ -403,6 +484,76 @@
     });
 
     btn.disabled = false;
+  });
+
+  // ── Output folder picker ───────────────────────────────────────────────────
+  let browsePath = null;   // dir currently shown in the modal
+
+  async function browseTo(path) {
+    setMsg($('browse-msg'), '');
+    const url = '/api/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
+    const d = await fetch(url).then(r => r.json());
+    browsePath = d.path;
+    $('browse-cur').textContent = d.path;
+
+    const list = $('browse-list');
+    list.innerHTML = '';
+
+    if (d.parent) {
+      const up = document.createElement('div');
+      up.className = 'browse-item';
+      up.innerHTML = '<span class="ic">↑</span><span>..</span>';
+      up.onclick = () => browseTo(d.parent);
+      list.appendChild(up);
+    }
+    for (const name of d.dirs) {
+      const it = document.createElement('div');
+      it.className = 'browse-item';
+      it.innerHTML = '<span class="ic">▸</span><span></span>';
+      it.querySelector('span:last-child').textContent = name;
+      it.onclick = () => browseTo(d.path.replace(/\/$/, '') + '/' + name);
+      list.appendChild(it);
+    }
+    if (!d.parent && !d.dirs.length) {
+      const e = document.createElement('div');
+      e.className = 'browse-empty';
+      e.textContent = '(no subfolders)';
+      list.appendChild(e);
+    }
+  }
+
+  $('scan-out-btn').addEventListener('click', () => {
+    $('browse-modal').classList.remove('hidden');
+    browseTo(outDir);
+  });
+  $('browse-close').addEventListener('click', () => {
+    $('browse-modal').classList.add('hidden');
+  });
+  $('browse-modal').addEventListener('click', e => {
+    if (e.target === $('browse-modal')) $('browse-modal').classList.add('hidden');
+  });
+
+  $('browse-use').addEventListener('click', () => {
+    if (!browsePath) return;
+    outDir = browsePath;
+    $('scan-out').textContent = outDir;
+    $('browse-modal').classList.add('hidden');
+  });
+
+  $('browse-new').addEventListener('click', async () => {
+    const name = prompt('New folder name:');
+    if (!name) return;
+    const resp = await fetch('/api/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: browsePath, name }),
+    });
+    const d = await resp.json();
+    if (!resp.ok) {
+      setMsg($('browse-msg'), d.error || 'mkdir failed', 'err');
+      return;
+    }
+    browseTo(d.path);   // descend into the freshly created folder
   });
 
   // ── File upload ──────────────────────────────────────────────────────────
