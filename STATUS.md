@@ -33,6 +33,24 @@ user-space stack with Ghidra (workspace in `re/`, git-ignored; findings in
   negatives (no inversion/render) — a Pakon-style SCP-Dmin mode would be the
   natural next tool improvement.
 
+**GOAL PIVOT → capture-free independent backend (2026-05-31).** Verbatim replay is
+non-reproducible: the OEM auto-calibrates each session (lamp/CCD drift), and a
+capture freezes one session's gain/offset/exposure — so the same negative scans
+differently each time. Fix: a DRIVEN scan that measures + computes calibration each
+session. Plan: OPEN → param-table read → CALIBRATE (measure+adjust) → CONFIGURE
+(write computed values) → SCAN. Milestones: (1) register map ✅, (2) calibrate
+algorithm, (3) driven C backend.
+- **Milestone 1 DONE — register map decoded** (`docs/REGISTERS.md`). WriteRegister
+  frame `02 <cnt> <ADDR> 03 <bank> <reg> <v16>` (read-back verified). Bank 0x84 =
+  CCD AFE: Gain_R/G/B (regs 2-4, 6-bit), Offset_R/G/B (regs 5-7, sign-mag). Bank
+  0x82 = CCD timing: CcdExposure_R/G/B (regs 1-3, 12-bit), Height (reg 6),
+  control bitmask (reg 0). Address caveat: TLA uses 0xF0 (CCD1) where our F-135
+  wire uses 0x20 (PICL) — same bank/reg semantics, use F-135 addrs.
+- **NEXT (milestone 2):** the CALIBRATE feedback algorithm (`EventScanCalibrate`)
+  — how open-gate CCD readings drive gain/offset/exposure to target white. The
+  make-or-break piece; needs decompile + on-hardware iteration. Plus LampLevel +
+  motor/geometry registers.
+
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
 2 late errors). Sample under analysis: `/Volumes/Video/scan.raw`.

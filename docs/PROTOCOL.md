@@ -181,12 +181,14 @@ space (previously "undocumented, do not guess"). `0xA0` = FX2 RAM load; the
 ### Parameters are written via a generic `WriteRegister` helper
 
 Scan/calibration parameters are **not** bespoke packets. They funnel through a
-register-write helper family (`TLA.dll FUN_1000e510(commObj, ctx, address, reg,
+register-write helper family (`TLA.dll FUN_1000e510(commObj, ctx, bank, reg,
 value16, flags)`, short form `FUN_1002f880(this, ctx, reg, value, flags)`) that
-emits `type=0x02` frames `02 <count> <address> <reg> <value…>`. The address space
-is wider than PICL/PICM — e.g. `0x82` is the CCD/exposure controller. So the
-advance write `02 05 24 02 a5 1c 25` is `WriteRegister(addr=0x24 PICM, reg=0x02,
-value=24-bit 0x251ca5)` (see "Advance duration parameter" below).
+emits `type=0x02` frames `02 <count> <addr> 03 <bank> <reg> <value16>` (banks
+`0x82` = CCD timing/exposure, `0x84` = CCD analog front-end; writes are read-back
+verified). So the advance write `02 05 24 02 a5 1c 25` is the same family targeting
+the motor (`WriteRegister(addr=0x24 PICM, reg=0x02, value=24-bit 0x251ca5)`).
+**The full decoded register map (gain/offset/exposure/height) is in
+`docs/REGISTERS.md`** — the foundation for a capture-free driven backend.
 
 ### Scan engine is a producer/consumer ring buffer (not a poll loop)
 
