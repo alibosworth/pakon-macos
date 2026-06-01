@@ -71,20 +71,36 @@ real state in our backend: OPEN → param read → **CALIBRATE (measure+adjust)*
 CONFIGURE (write computed gain/offset/exposure) → SCAN. We already own the CCD
 line read (Phase 5 `0x86` stream), the register-write frame, and the algorithm.
 
-Sequence to implement (all gate-no-film):
-1. Gate→opaque, gain 0; loop ≤8: write offset 0x84.5/6/7, grab 32 lines, mean→300±32,
-   step `(300−mean)/38.4`.
-2. Gate→visible, nominal exposure; loop ≤4: write gain 0x84.2/3/4, grab 32 lines
+**Capture mining DONE (2026-05-31) — addresses confirmed, no fresh capture needed.**
+Mined `resources/pakon_scan.pcapng` + `pakon_fullroll.pcapng` on the Mac:
+- ✅ **CALIBRATE/CONFIGURE register writes target wire addr `0x24` (PICM)** for BOTH
+  bank 0x82 (timing/exposure) and 0x84 (gain/offset) — frame `02 06 24 03 <bank>
+  <reg> <v16>`. Zero at 0x20 across both captures. **This corrects the old REGISTERS.md
+  "0x20 for CCD" note.** Motor/advance also 0x24. PICL (0x20) is a separate PIC
+  doing scan-time block exposure streaming + LED/geometry — likely illumination.
+- ✅ **No filter wheel on F-135** (gate codes 0xe3/e4/e5 never written). Dark-offset
+  must use lamp-off or the dark-leader rows, not an opaque gate.
+- ✅ **Seed values** (what a correct driven loop should hit): Gain R/G/B ≈ 0x0d (13),
+  Offset R/G/B ≈ −51/−42/−43, Height 0x0c1a. See REGISTERS.md "Sanity-check seeds".
+- ❌ **Lamp**: no 11500–14900 DAC value anywhere → F-235/335 `LampLevel` (0xf6) does
+  NOT apply to F-135. F-135 illumination control is the one real remaining unknown.
+
+Sequence to implement (CCD writes → addr `0x24`):
+1. Dark offset (lamp off / dark-leader rows, gain 0); loop ≤8: write offset 0x84.5/6/7,
+   grab 32 lines, mean→300±32, step `(300−mean)/38.4`.
+2. Gain (illuminated, nominal exposure); loop ≤4: write gain 0x84.2/3/4, grab 32 lines
    averaged, peak→64000, `gain=round(factor·64000/peak)`, `factor=1/(1−gain·k)`.
 3. 6-pt exposure sweep + per-channel OLS → write exposure 0x82.1/2/3, clamp [0xd,0xfff].
-4. Thin coverage → trim lamp (0xf6.0x80), repeat ≤2.
+4. (Lamp trim is F-235/335 only — skip on F-135.)
 
-Blocking unknowns to resolve FIRST (from a fresh scan capture — Linux box):
-- **Lamp F-135 wire address** (TLA uses 0xf6; 0xf0→0x20, 0xf4→0x24, 0xf6→?). Find
-  the CONFIGURE-phase write carrying an ~11500–14900 value.
-- **Filter-wheel/gate** F-135 wire codes (TLA 0xf4 / 0xe3..0xe5).
-- The exact `.data` target constants — verify by calibrating to known targets and
-  reading back on hardware.
+Remaining unknowns (do NOT block steps 1–3; confirm on hardware):
+- **F-135 illumination/lamp control** — decompile the F-135 path or proceed with
+  device-default illumination for the first driven run.
+- `.data` target constants (`_DAT_1006f268`≈64000, gain `k`) — read back on hardware.
+
+What to do with the scanner (milestone-3 test): implement steps 1–3 as a driven
+CALIBRATE state, run on the Linux box, and check the loop converges near the seed
+values above (gain≈13, offset≈−45). That match is the success signal.
 
 Environment note: this work mines the **Ghidra dumps `re/out/TLA.c` / `TLC.c`**,
 which are **git-ignored and exist only on the Mac** (regenerate via

@@ -31,17 +31,27 @@ writes are verified**.
 
 ### Address reconciliation (IMPORTANT)
 
-The decompiled TLA builds these frames with `ADDR = 0xF0` (its `AD_CCD1`). Our
-real **F-135 wire captures use `ADDR = 0x20`** (PICL) for the same CCD writes
-(`02 06 20 03 …`) and `0x24` (PICM) for motor. So TLA targets a different address
-scheme (F-235/335-Plus subsystem layout, `AD_CCD1=0xf0`/`AD_MOTOR=0xf4`), but the
-**bank/reg/value semantics are identical**. ⇒ Use our captured F-135 address bytes
-(`0x20` CCD/PICL, `0x24` motor/PICM), with the bank/reg map below. Confirm each
-register against a capture before trusting it on hardware.
+The decompiled TLA builds these frames with `ADDR = 0xF0` (its `AD_CCD1`). TLA
+targets a different address scheme (F-235/335-Plus subsystem layout,
+`AD_CCD1=0xf0`/`AD_MOTOR=0xf4`/`AD_LAMP=0xf6`), but the **bank/reg/value semantics
+are identical** to the F-135 wire.
 
-TLA subsystem address scheme (full): `0xf0` = CCD, `0xf4` = motor + filter-wheel,
-`0xf6` = lamp. Mapping to F-135 wire: `0xf0→0x20` (PICL), `0xf4→0x24` (PICM);
-**`0xf6` (lamp) F-135 wire address is not yet captured — TBD** (see Lamp below).
+⚠️ **CORRECTED (2026-05-31, from capture mining):** on the F-135 wire, the
+single-register `WriteRegister` frames for **both** bank `0x82` (timing/exposure)
+and bank `0x84` (gain/offset) target **`ADDR = 0x24` (PICM)** — NOT `0x20`. Verified
+across two scan captures (`resources/pakon_scan.pcapng` dev13, `pakon_fullroll.pcapng`
+dev16): bank-82/84 `02 06 24 03 …` writes number 30+17 and 18+15 respectively, with
+**zero** at `0x20`. The motor/advance write (`02 05 24 02 …`) is also at `0x24`. So
+**PICM (`0x24`) is the CCD-AFE + timing + motor controller** — this is the address
+the driven CALIBRATE/CONFIGURE backend must use. (The earlier "`0x20` for CCD writes"
+note was mistaken.)
+
+PICL (`0x20`) is a *second* PIC, initialized identically at open (both PICs report
+ASCII `"12345"` to `01 0e <addr> 08 …`). PICL carries a **different** command family:
+the scan-time block exposure streaming `02 0f 20 0c 82 <6×16-bit>` (the per-frame
+"housekeeping" exposure writes) and `02 07 20 04 8b/8c/8d/8f <2×16-bit>` coordinate/
+timing pairs (LED/CCD-line geometry — exact meaning TBD). PICL likely owns
+illumination/timing; PICM owns the CCD registers we calibrate.
 
 ## Lamp / LED subsystem (TLA addr `0xf6`) — CONFIRMED in TLA, F-135 wire addr TBD
 
@@ -60,25 +70,30 @@ LampLevel clamps (in `FUN_10033c70`): values `< 0x2CEC` (11500) → treated as o
 ≈ 11500–14900 (~43.5–56% of a 16-bit range). `LampLevel` lives in the CiScanner
 param struct at `+0x50`.
 
-⚠️ The **F-135 wire address** for the lamp is unconfirmed — `0xf0/0xf4` map to
-`0x20/0x24`, but `0xf6` has no captured F-135 equivalent yet. Grab it from a scan
-capture's CONFIGURE phase (look for a non-0x20/0x24 `02`/`04` write carrying a
-~11500–14900 value) before driving the lamp from our backend.
+⚠️ **F-135 lamp is NOT this register.** Mining both scan captures found **no**
+16-bit value in the 11500–14900 range written anywhere, and no separate lamp
+address (only `0x10/0x20/0x24/0x44/0x46` appear). So the F-235/335 analog
+`LampLevel` DAC (`0xf6.0x80`) does **not** apply to the F-135 as-is. The F-135
+illumination is most likely an LED that is on/off or PWM-timed via the **PICL
+(`0x20`) `02 07 20 04 8b/8c/8d/8f`** coordinate/timing writes (those carry
+LED-ish two-value pairs), or set once at firmware init. **Pinning the F-135 lamp
+control is the one genuine remaining unknown** — best chased by decompiling the
+F-135-specific illumination path (not in TLA's F-235/335 `FUN_10033c70`), or a
+capture where lamp brightness is deliberately changed. For milestone 3, try
+driving CALIBRATE with the lamp left as the device defaults it.
 
-## Filter-wheel / gate position (TLA addr `0xf4`) — CONFIRMED in TLA
+## Filter-wheel / gate — N/A on F-135 (TLA addr `0xf4`)
 
-`FUN_10033250(this, param_1, uiPosition, sync)` moves the filter wheel / gate by
-writing a single byte command (`type=0x04`) to address `0xf4`. It maps the film
-format to a position code, then waits for the move:
-
-| film format | position code | meaning |
-|-------------|---------------|---------|
-| 1 (color-neg), 8 (IR) | `0xe3` | visible pass A |
-| 2 (color-pos), 4 (B&W) | `0xe4` | visible pass B |
-| 0x1000 / 0x2000 | `0xe5` | **opaque / dark** (used for dark-offset measurement) |
-
-Calibration drives the wheel to `0xe5` (opaque) for the dark-offset pass, then to
-a visible position for the gain/exposure passes.
+TLA's `FUN_10033250` moves a filter wheel by writing position codes `0xe3`/`0xe4`
+(visible) / `0xe5` (opaque/dark) to address `0xf4`. **The F-135 has no filter
+wheel** — those gate codes are never written on the wire (across both captures
+`0xe5` appears only as an incidental *data* byte inside a block exposure write,
+never as a gate command). The F-135 is a roll-film scanner with a trilinear RGB
+CCD and fixed optics. **Consequence for CALIBRATE:** the dark-offset phase cannot
+use an opaque gate as TLA does — on the F-135 it must measure dark either with the
+lamp off, or by reading the **dark leader region** of the scan (the captured scan
+shows a dark leader at rows 0–513 before the blank pre-load light region; see
+STATUS.md "Anatomy of scan.raw"). Verify on hardware.
 
 ## Bank 0x84 — CCD analog front-end (gain/offset) — CONFIRMED
 
@@ -238,29 +253,57 @@ gain). Treat as ~64000 and verify on hardware.
 
 ### What this means for the driven C backend
 
-The driven `CALIBRATE` state (replacing frozen replay) is:
+The driven `CALIBRATE` state (replacing frozen replay), adapted to the F-135 wire
+(all CCD writes → **addr `0x24`**, frame `02 06 24 03 <bank> <reg> <vLo> <vHi>`):
 
-1. Gate → opaque; gain 0; loop ≤8: write offset (0x84.5/6/7), grab 32 lines,
-   mean→300±32, step `(300−mean)/38.4`.
-2. Gate → visible; exposure nominal; loop ≤4: write gain (0x84.2/3/4), grab 32
-   lines averaged, peak→64000, `gain = round(factor·64000/peak)`, update
-   `factor = 1/(1−gain·k)`.
-3. 6-point exposure sweep + per-channel OLS → write exposure (0x82.1/2/3), clamp
-   `[0xd, 0xfff]`.
-4. If coverage thin, trim lamp (0xf6.0x80) and repeat (≤2).
+1. **Dark offset.** F-135 has no opaque gate — measure dark with the lamp off OR
+   from the dark-leader rows. Gain 0; loop ≤8: write offset (`0x24` bank 0x84
+   reg 5/6/7), grab 32 lines, mean→300±32, step `(300−mean)/38.4`.
+2. **Gain.** Illuminated, exposure nominal; loop ≤4: write gain (`0x24` bank 0x84
+   reg 2/3/4), grab 32 lines averaged, peak→64000, `gain = round(factor·64000/peak)`,
+   update `factor = 1/(1−gain·k)`.
+3. **Exposure.** 6-point sweep + per-channel OLS → write exposure (`0x24` bank 0x82
+   reg 1/2/3), clamp `[0xd, 0xfff]`.
+4. Lamp trim is F-235/335 only (no F-135 LampLevel DAC found) — skip until the
+   F-135 illumination control is pinned.
 
-We already own the CCD line read (Phase 5 `0x86` stream) and the register-write
-frame, so each step is implementable. **Open items before hardware iteration:**
-the lamp F-135 wire address (above), the exact `.data` target constants, and the
-filter-wheel/gate codes on the F-135 wire (TLA uses 0xf4/`0xe3..0xe5`).
+We already own the CCD line read (Phase 5 `0x86` stream), the register-write frame,
+and (now) the confirmed target address `0x24`, so steps 1–3 are implementable.
+
+**Sanity-check seeds — the OEM's own converged values** (from `pakon_scan.pcapng`,
+the numbers a correct driven CALIBRATE should land near):
+
+| register | wire frame | value |
+|----------|-----------|-------|
+| Gain_R (0x84.2) | `02 06 24 03 84 02 0d 00` | 0x0d = 13 |
+| Gain_G/B (0x84.3/4) | `… 84 03 0d 00` / `… 84 04 0d 00` | 13 / 13 |
+| Offset_R (0x84.5) | `02 06 24 03 84 05 33 01` | 0x0133 → −51 (sign-mag) |
+| Offset_G (0x84.6) | `… 84 06 2a 01` | 0x012a → −42 |
+| Offset_B (0x84.7) | `… 84 07 2b 01` | 0x012b → −43 |
+| Height (0x82.6) | `02 06 24 03 82 06 1a 0c` | 0x0c1a = 3098 lines |
+
+(Earlier in the session the OEM writes a flat `0x0a` to gains and `0x000a` to
+offsets — the pre-calibration reset — then converges to the values above. Seeing
+our driven loop arrive near gain≈13 / offset≈−45 is the on-hardware success signal.)
+
+**Open items before hardware iteration:** the F-135 illumination/lamp control
+(see Lamp section — the one real unknown) and the exact `.data` target constants
+(`_DAT_1006f268`≈64000.0, gain `k`); both confirmable on hardware by reading back.
 
 ## Still TBD (next steps toward the driven backend)
 
-1. **Lamp F-135 wire address** — TLA uses `0xf6`; capture the F-135 equivalent
-   (see Lamp section). Then the full driven CALIBRATE is implementable end to end.
-2. **Motor/geometry registers** on PICM (`0x24`) — speed, stepper, advance.
-3. **Remaining bank 0x82 timing regs** (4,5,10,0xb) and bank 0x84 reg 0/1.
-4. **Confirm the open `.data` constants** (`_DAT_1006f268` target, gain `k`) by
-   instrumenting on hardware — calibrate to known targets and read back.
-5. Verify every "CONFIRMED" register against a real capture before relying on it
-   (address-scheme caveat above).
+1. **F-135 illumination/lamp control** — the one real unknown. The F-235/335
+   `LampLevel` DAC (`0xf6.0x80`) does not exist on the F-135 wire. Chase via the
+   F-135-specific decompile path or a brightness-changing capture; or proceed with
+   device-default illumination for milestone 3 (see Lamp section).
+2. **Confirm the open `.data` constants** (`_DAT_1006f268`≈64000 target, gain `k`)
+   on hardware — calibrate to known targets and read back.
+3. **Remaining bank 0x82 timing regs** (4,5,10,0xb) and bank 0x84 reg 0/1. The
+   capture shows their OEM values (e.g. `82.4`=0x06/0x2b/0x3e, `82.5`=0x080e/0x07fb,
+   `82.0a`=0x0400, `84.0`=0x78, `84.1`=0x80) — decode meanings if needed.
+4. **PICL (`0x20`) command family** — block exposure streaming `02 0f 20 0c 82 …`
+   and `02 07 20 04 8b/8c/8d/8f …` geometry/LED pairs; relevant if illumination
+   turns out to live here.
+5. Done: CALIBRATE register writes confirmed at **`0x24`** across two captures;
+   no filter wheel on F-135. Still verify any remaining "CONFIRMED" register
+   against a capture before relying on it.
