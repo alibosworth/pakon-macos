@@ -200,25 +200,16 @@ algorithm, (3) driven C backend.
   (`a≈1.0, b≈+400`). User confirmed "colours are even". Commits `8d6f511`
   (channel order) + `5a37f86` (seam correction, now near-no-op).
 
-**OPEN — FRAME SPLITTING for LowRes whole-roll (the live problem; do NOT
-declare done — get user confirmation):** The current `find_frame_boundaries`
-(per-row detail valleys + prominence ranking, central-50%-columns, auto-count)
-is **the wrong model** per the operator. My attempts this session (median/min
-width, center-crop, pad/trim to a target, pre-roll T//2 exclusion, min-gap merge)
-were rejected as "dumb / nonsensical" and **reverted** (tree is back at `3b5ccb0`).
-THE CORRECT MODEL (operator's steer — implement this next):
-- **35mm frames are a STANDARD FIXED WIDTH** — every frame is the same size; do
-  NOT measure each frame independently and then trim/pad to reconcile.
-- **Inter-frame spacing (pitch) is CONSISTENT** — small variation at most.
-- So: detect the **period/pitch ONCE** (e.g. autocorrelation of the per-row
-  detail signal, or median valley spacing), then lay down a **regular grid** of
-  fixed-width crops at that pitch. All outputs same width (the operator wants
-  **exactly 3000 px** wide), no per-frame trim/pad.
-- **Exclude the bright pre-roll**: the roll starts with a very bright gap = the
-  scanner's open-gate WHITE light before the negative was inserted (not a frame
-  edge). Drop it before/while gridding.
-- Frame COUNT should fall out of (roll length ÷ pitch), not be a required
-  `--frames` arg (operator wants that param gone — auto from the pitch).
+- **FRAME SPLITTING for LowRes whole-roll — SOLVED & confirmed (commit
+  `35436ed`).** `find_frame_grid` fits a global fixed-pitch grid: scan candidate
+  (pitch, phase) pairs and pick the one that puts every cut line in a low-detail
+  inter-frame gap at once. On `fullroll.raw` it locks pitch=3210 rows (cuts at
+  detail 0.31 vs frame-centers 0.49), excludes the bright pre-roll (open-gate
+  white before the neg loads), prunes degenerate end slivers, and emits uniform
+  **3000 px** centred crops. Frame count falls out of the grid (25 frames; frame
+  25 = unexposed end-of-roll tail, expected). `--frames N` still forces a count.
+  This replaced the rejected per-frame measure-then-trim/pad approach (which the
+  operator called "dumb / nonsensical").
 
 **THEN, lower priority:**
 - **C-41 INVERSION** (the "figure it out" piece). Raw negatives have the C-41
@@ -513,22 +504,17 @@ Fix: `--resample-to 3000x2000` (Lanczos, `!`-forced exact size via ImageMagick).
 Without resampling, the full-roll frames are ~3430×2007 ≈ 1.7:1 (wrong).
 With `--resample-to 3000x2000`: correct 3:2 = 2:3 portrait / landscape. ✓
 
-### Frame boundary detection — OPEN, needs a rewrite to a fixed-pitch grid model
+### Frame boundary detection — SOLVED (fixed-pitch grid, commit `35436ed`)
 
-`pakon_image.py` currently uses per-row detail valley detection (central-50%-
-columns std profile, local minima ranked by prominence, auto-count via the
-largest prominence ratio gap). It works OK for `scan.raw` 4-frame but is **wrong
-for the whole-roll LowRes case** — frames come out uneven and occasionally
-double-count a dark scene row as a gap.
-
-**Operator's correct model (implement next, do NOT trim/pad to patch it up):**
-35mm frames are a **standard fixed width**; inter-frame **pitch is consistent**.
-So detect the pitch ONCE (autocorrelation of the detail signal or median valley
-spacing), lay a **regular grid** of fixed-width crops (operator wants exactly
-**3000 px** wide each), exclude the **bright pre-roll** (open-gate white before
-the neg was inserted), and let the frame COUNT fall out of roll-length ÷ pitch
-(drop the `--frames` arg). The per-frame measure-then-trim/pad approach was
-tried this session and **rejected/reverted** — do not repeat it.
+`pakon_image.py`'s `find_frame_grid` fits a single global grid: it scans
+candidate (pitch, phase) pairs and picks the one that places every cut line in a
+low-detail inter-frame gap simultaneously — the physically correct model since
+35mm frames are a constant width at a consistent pitch. It excludes the bright
+pre-roll (open-gate white before the neg loads), prunes degenerate end slivers,
+and emits uniform **3000 px** centred crops. Frame count falls out of the grid
+(`--frames N` still forces a count). Validated on `fullroll.raw`: pitch 3210
+rows, 25 uniform frames, operator-confirmed. (Superseded the per-frame valley +
+trim/pad approach, which was rejected.)
 
 ### pakon_image.py current command
 

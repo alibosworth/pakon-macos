@@ -15,9 +15,9 @@ Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 >
 > The decoder handles both the 4-frame (HiRes) and whole-roll (LowRes) scan
 > modes, including Digital ICE IR channel removal, wrap-order de-interleaving,
-> per-zone trilinear registration, and per-zone channel-order correction (the
-> two CCD taps interleave RGB differently). Whole-roll **frame splitting** is
-> still being refined toward a fixed-width / fixed-pitch grid model.
+> per-zone trilinear registration, per-zone channel-order correction (the two
+> CCD taps interleave RGB differently), and fixed-pitch frame splitting that
+> auto-detects the frame count and emits uniform-width crops.
 
 ## Architecture
 
@@ -160,10 +160,10 @@ python3 tools/pakon_image.py scan.raw --rotate 90 --frames 4 --resample-to 3000x
 python3 tools/pakon_image.py fullroll.raw --rotate 90 --resample-to 3000x2000
 ```
 
-> **Note (whole-roll frame splitting is WIP):** auto-detection of frame
-> boundaries on long LowRes rolls is being reworked toward a fixed-width /
-> fixed-pitch grid (35mm frames are a constant width with consistent spacing).
-> Pass `--frames N` to force a known count if auto-detection miscounts.
+> **Whole-roll frame splitting:** the decoder fits a fixed-pitch grid (35mm
+> frames are a constant width with consistent spacing), excludes the bright
+> open-gate pre-roll, and emits uniform 3000 px-wide frames. The frame count is
+> auto-detected from the grid; pass `--frames N` to force a known count.
 
 Writes `frame_1.tif` … `frame_N.tif` as 16-bit RGB TIFFs — registered,
 autocropped raw negatives, orange mask intact. Feed them to Negative Lab Pro,
@@ -191,7 +191,7 @@ Key decoder options:
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--frames N` | auto | split into N frames; omit to auto-detect from gap detection |
+| `--frames N` | auto | force N frames; omit to auto-detect from the fixed-pitch grid |
 | `--rotate {90,180,270}` | 0 | rotate each output frame |
 | `--resample-to WxH` | off | resample to exact size (use `3000x2000` for 35mm) |
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
