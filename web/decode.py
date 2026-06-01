@@ -132,10 +132,12 @@ def decode_raw(
     emit("Finding frame grid", 0.57)
     cut_rows, pitch = find_frame_grid(rgb)
     n_out = max(0, len(cut_rows) - 1)
+    # Trust the detected boundaries; crop a FIXED width (3000 px, capped at the
+    # pitch) centred between each pair of gaps — leftover splits evenly as edge
+    # margin, rebate stays off both edges, every frame the same size.
+    frame_w = min(3000, pitch)
     if n_out <= 1:
-        cut_rows, n_out, target_w = [0, rgb.shape[0]], 1, None
-    else:
-        target_w = min(pitch, 3000)
+        cut_rows, n_out, frame_w = [0, rgb.shape[0]], 1, None
 
     # ── C-41 inversion setup ────────────────────────────────────────────────────
     # Film base (Dmin) measured once on the whole ribbon so every frame inverts
@@ -150,12 +152,13 @@ def decode_raw(
     for i in range(n_out):
         emit(f"Exporting frame {i + 1}/{n_out}", 0.60 + 0.40 * i / n_out)
 
-        r_start, r_end = cut_rows[i], cut_rows[i + 1]
-        if target_w is not None:
-            centre = (r_start + r_end) // 2
-            r_start = max(0, centre - target_w // 2)
-            r_end = min(rgb.shape[0], r_start + target_w)
-            r_start = max(0, r_end - target_w)
+        if frame_w is None:
+            r_start, r_end = cut_rows[i], cut_rows[i + 1]
+        else:
+            centre = (cut_rows[i] + cut_rows[i + 1]) // 2
+            r_start = max(0, centre - frame_w // 2)
+            r_end = min(rgb.shape[0], r_start + frame_w)
+            r_start = max(0, r_end - frame_w)
         part = rgb[r_start:r_end]
 
         # Optional centre crop: trim the frame-edge rebate/gap band. 100 = none.

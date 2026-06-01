@@ -451,8 +451,9 @@ def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
     interior boundary to its local detail minimum (the actual rebate) to absorb
     film-advance jitter. `n_frames` is an optional hard override (rarely needed).
 
-    Returns (cut_rows, pitch): boundary rows spanning the film + the period in
-    rows. The caller crops a fixed width centred in each [cut_k, cut_{k+1}] cell.
+    Returns (cut_rows, pitch): the inter-frame boundary rows (gap positions)
+    spanning the film, and the frame period in rows. The caller crops a fixed
+    width centred in each [cut_k, cut_{k+1}] cell.
     """
     rows, cols, _ = ribbon.shape
 
@@ -483,38 +484,73 @@ def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
 
     P_lo, P_hi = max(2, pitch_lo // step_r), pitch_hi // step_r
 
-    # (1) True pitch via autocorrelation of the (detrended) detail profile in the
-    # film region. The dominant period in [pitch_lo, pitch_hi] is the frame pitch.
+    # (1) True pitch via autocorrelation of the (detrended) detail profile.
     d = detail[start:end] - detail[start:end].mean()
     if len(d) > P_hi:
         ac = np.correlate(d, d, mode="full")[len(d) - 1:]
         seg = ac[P_lo:P_hi + 1]
-        pitch = P_lo + int(np.argmax(seg)) if len(seg) else max(2, span // 36)
+        pitch0 = P_lo + int(np.argmax(seg)) if len(seg) else max(2, span // 36)
     else:
-        pitch = max(2, span // max(1, (n_frames or 36)))
+        pitch0 = max(2, span // max(1, (n_frames or 36)))
+    if n_frames and n_frames > 1:           # optional hard override
+        pitch0 = max(2, span // n_frames)
 
-    # (2) Count: round(span / pitch) (auto). `n_frames` only overrides if a caller
-    # explicitly demands a fixed count. Then anchor a grid that spans the whole
-    # film [start, end] in exactly n_cells equal cells (eff_pitch ≈ true pitch);
-    # the autocropped edges are frame boundaries, so this lands cuts near gaps.
-    n_cells = n_frames if (n_frames and n_frames > 1) else max(1, round(span / pitch))
-    if n_cells < 1:
-        return [0, rows], pitch * step_r
-    eff_pitch = span / n_cells
-    grid = [start + round(k * eff_pitch) for k in range(n_cells + 1)]
+    # (2) Phase-locked uniform comb. Film advance is regular, so the gaps sit at
+    # φ + k·P — fit ONE (P, φ) that lands the whole comb in low-detail gaps (use
+    # every comb tooth at once; do NOT snap cuts individually — that just chases
+    # dark-scene minima and distorts frames). Search P in a narrow band around
+    # the autocorr pitch.
+    lo = max(P_lo, int(pitch0 * 0.95))
+    hi = min(P_hi, int(pitch0 * 1.05))
+    best = None
+    for P in range(lo, hi + 1):
+        for phi in range(0, P, max(1, P // 80)):
+            pos = np.arange(start + phi, end, P)
+            if len(pos) < 2:
+                continue
+            score = dnorm[pos].mean()
+            if best is None or score < best[0]:
+                best = (score, P, phi)
+    if best is None:
+        return [0, rows], pitch0 * step_r
+    _, P, phi = best
 
-    # (3) Snap each interior boundary to the local detail minimum (the rebate)
-    # within ±0.20·pitch — absorbs per-frame advance jitter. The window is < half
-    # a pitch so neighbouring cuts can never collide (count is preserved exactly).
-    half = max(2, int(0.20 * eff_pitch))
-    cuts = [int(np.clip(grid[0], 0, n - 1))]
-    for c in grid[1:-1]:
-        a, b = max(0, c - half), min(n, c + half + 1)
-        cuts.append(a + int(np.argmin(det_s[a:b])))
-    cuts.append(int(np.clip(grid[-1], 0, n - 1)))
+    # (3) Lock each comb tooth onto its actual gap (deepest detail dip in a small
+    # window — the comb is already close, so this won't reach distant dark-scene
+    # minima) for accurate gap positions. These boundaries are trustworthy; the
+    # caller crops a fixed width centred between them (gaps vary in width, so we
+    # do NOT try to measure each rebate — that's unreliable).
+    def snap(g):
+        w = max(2, int(0.12 * P))
+        a, b = max(0, g - w), min(n, g + w + 1)
+        return a + int(np.argmin(det_s[a:b]))
 
-    cut_rows = [int(c * step_r) for c in cuts]
-    return cut_rows, int(eff_pitch * step_r)
+    gaps = [snap(g) for g in range(start + phi, end, P) if start < g < end]
+    bounds = sorted(set([start] + gaps + [end]))
+    cells = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    # (4) Drop junk end cells: partial slivers (< 0.55·P, leader/tail fragments)
+    # and leading/trailing low-detail cells (the leader/blank produces one — a
+    # real frame carries detail; interior dark frames are kept).
+    cell_det = [float(dnorm[a:b].mean()) for a, b in cells]
+    med = float(np.median(cell_det)) if cell_det else 0.0
+    keep = [c[1] - c[0] >= 0.55 * P for c in cells]
+    for i in range(len(cells)):                       # leading
+        if keep[i] and cell_det[i] < 0.45 * med:
+            keep[i] = False
+        elif keep[i]:
+            break
+    for i in range(len(cells) - 1, -1, -1):           # trailing
+        if keep[i] and cell_det[i] < 0.45 * med:
+            keep[i] = False
+        elif keep[i]:
+            break
+    cells = [c for c, k in zip(cells, keep) if k]
+    if not cells:
+        return [0, rows], P * step_r
+
+    cut_rows = [int(cells[0][0] * step_r)] + [int(c[1] * step_r) for c in cells]
+    return cut_rows, P * step_r
 
 
 def write_preview(rgb16, path, maxdim=1000):
@@ -714,31 +750,28 @@ def main():
 
     rot = (args.rotate // 90) % 4
 
-    # Fixed-pitch frame grid (35mm frames are constant width, consistent pitch).
+    # Auto-detected frame grid (count never forced; see find_frame_grid).
     cut_rows, pitch = find_frame_grid(rgb, args.frames)
     fr = max(0, len(cut_rows) - 1)
+    # Trust the detected boundaries; crop a FIXED width (3000 px, capped at the
+    # pitch) centred between each pair of gaps so the leftover splits evenly as
+    # edge margin and the rebate stays off both edges. Variable per-gap trimming
+    # is unreliable, so everything is the same width.
+    frame_w = min(3000, pitch)
     if fr <= 1:
-        # No grid (single frame / short ribbon): emit the whole thing.
-        cut_rows, fr = [0, rgb.shape[0]], 1
-        target_w = None
+        cut_rows, fr, frame_w = [0, rgb.shape[0]], 1, None
         print("single frame")
     else:
-        # Output width = the pitch (a full frame cell), capped at 3000. The small
-        # inter-frame gap sits at the cell edges, so a fixed crop ≤ pitch centred
-        # in each cell keeps just the frame. Every frame gets the same width.
-        target_w = min(pitch, 3000)
-        print(f"frame grid: pitch={pitch} rows, {fr} frames, "
-              f"cuts={cut_rows}, output width {target_w}")
+        print(f"frame grid: pitch={pitch} rows, {fr} frames")
 
     for i in range(fr):
-        r_start, r_end = cut_rows[i], cut_rows[i + 1]
-        if target_w is not None:
-            # Centre a fixed-width window inside this grid cell so every frame
-            # is the same width and the inter-frame gaps are trimmed equally.
-            centre = (r_start + r_end) // 2
-            r_start = max(0, centre - target_w // 2)
-            r_end = min(rgb.shape[0], r_start + target_w)
-            r_start = max(0, r_end - target_w)
+        if frame_w is None:
+            r_start, r_end = cut_rows[i], cut_rows[i + 1]
+        else:
+            centre = (cut_rows[i] + cut_rows[i + 1]) // 2
+            r_start = max(0, centre - frame_w // 2)
+            r_end = min(rgb.shape[0], r_start + frame_w)
+            r_start = max(0, r_end - frame_w)
         part = rgb[r_start:r_end]
         if c41 is not None:
             part = invert_c41(part, c41[0], c41[1], matrix=args.c41_matrix,
