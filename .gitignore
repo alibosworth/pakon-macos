@@ -26,3 +26,8 @@ frame_*.png
 # python cruft
 __pycache__/
 *.pyc
+
+# third-party OEM software + reverse-engineering workspace (copyrighted; not ours
+# to redistribute). Findings are folded into docs/PROTOCOL.md instead.
+/pakon-scanning-software/
+/re/

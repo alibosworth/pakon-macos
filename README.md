@@ -2,8 +2,9 @@
 
 A cross-platform (Linux + macOS) [SANE](http://www.sane-project.org/) backend
 for the Kodak/Pakon **F-135** film scanner (and the "Plus" / F-235 / F-335
-variants). Unofficial, clean-room reimplementation built from documented
-protocol notes and our own USB captures.
+variants). Unofficial, independent reimplementation built from documented
+protocol notes, our own USB captures, and reverse engineering of the original
+Windows software for interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 
 > **Status:** Phases 0–5 complete. Full end-to-end scan works on hardware —
 > firmware load, open handshake, film advance, scan drive, and image decode
@@ -126,8 +127,9 @@ To transport film to the desired position (e.g. to the first frame):
 Each step sends the start command, polls until the scanner signals the frame
 is in position, then sends the finalize command. `--limit SEC` sets a
 wall-clock safety cap (default 60 s). The advance duration (how far each step
-moves the film) is set by the TLX software in seconds and is encoded in the
-`.pakscan` script.
+moves the film) is a 24-bit value written to PICM register `0x02` (set by the
+TLX software in seconds) and is carried verbatim in the `.pakscan` script — see
+`docs/PROTOCOL.md`.
 
 **5. Run a scan**
 

@@ -70,23 +70,51 @@ the `0xA4` finalize). Still TODO: the actual `.hex` provenance/mapping.
 | AD_PICM_PLUS        | 0x44 |
 | AD_BOOT_PICM_PLUS   | 0x46 |
 
-### Status byte (scanner→host) — documented
+### Status byte (scanner→host) — CONFIRMED (OEM decompilation)
 
 `0` success, `1` not acked, `2` invalid packet, `3` bad checksum, `4`–`6`
 USB-related, `7` host algorithm error, `8` success, `9` bus error.
 
-### Packet `type` byte — **inferred / TBD**
+The OEM error-string table (`TLA.dll`) corroborates this exactly — each status
+maps to a named `EC_DRV_PacketHostError*` code:
+
+| status | OEM error name |
+|---|---|
+| 1 | `EC_DRV_PacketHostErrorNoAck` (0x3f3) |
+| 2 | `EC_DRV_PacketHostErrorFormat` (0x3f4) |
+| 3 | `EC_DRV_PacketHostErrorCkSum` (0x3f5) |
+| 4–6 | `EC_DRV_PacketHostError{EndPointFormat,EndPointTimeOut,EndPointLength}` (0x3f6–8) |
+| 7 | `EC_DRV_PacketHostErrorAlgo` (0x3f9) |
+| 9 | `EC_DRV_PacketHostErrorBus` (0x3fa) |
+
+Plus device-side conditions worth handling: `RingTailOverflow` (0x3ea),
+`LostSync` (0x3eb), `FifoOverflow` (0x3ee), `PacketBusy` (0x3ed),
+`TransferInProgress` (0x3fe).
+
+### Packet `type` byte — reply semantics CONFIRMED (OEM decompilation)
 
 The names `PH_CMD`, `PH_READ_STATUS`, `PH_INVALID` are documented but their
-numeric values are **not** confirmed. Observed on the wire (open handshake):
-host command frames begin `0x04`, the reply begins `0x07`. The name→value
-mapping is to be nailed down in Phase 3 from real traffic.
+numeric values are still not individually mapped. Observed on the wire (open
+handshake): host command frames begin `0x04`, the reply begins `0x07`.
 
-### Checksum — **inferred / TBD (Phase 3)**
+The OEM command-transaction routine (`TLC.dll FUN_1000c800`, see "Host transport"
+below) validates the **reply** `type` byte (`reply[0]`) as:
 
-Algorithm not yet derived. Will be reverse-derived and hard-validated against
-known-good sample packets, e.g. the open packet `04 03 10 00 85`, before it is
-trusted for scan commands.
+| `reply[0]` | meaning |
+|---|---|
+| `7` | **success** (the normal reply, e.g. `07 02 10 00`) |
+| `1` or `3` | OK **iff** it echoes the sent `type` byte (status-class reply) |
+| anything else | error `EC_DRV_InvalidPacketType` (0x3ec) |
+
+### Checksum — short frames carry a param byte, not a checksum
+
+The OEM error table defines `EC_DRV_PacketChecksumErr` / `…HostErrorCkSum`, so a
+checksum mechanism exists in the protocol generally, but the short command frames
+we send/replay carry **no trailing checksum** — the OEM transaction sends exactly
+`count + 2` bytes (`packet[1] + 2`) with no checksum appended, and the trailing
+`0x85` in the open packet is a command/parameter byte (the analogous
+`04 03 44 00 00` ends in `00`). No checksum derivation is needed for the frames
+in our scan/advance paths.
 
 ## Endpoints — CONFIRMED from scan capture (operational `0F05:F135`)
 
@@ -107,6 +135,85 @@ on `0x81`; image bytes stream from `0x86`.
 > The earlier 6-endpoint / 4-alt-setting map was the **`f235` bootstrap**
 > descriptor (and is why `--probe-open` NAK'd — the bootstrap implements no app
 > protocol). The operational `f135` is the simple 3-endpoint device above.
+
+## Host transport — CONFIRMED from OEM software decompilation
+
+The original Kodak/Pakon Windows software was reverse-engineered (for
+interoperability) with Ghidra to corroborate the capture-derived protocol. See
+`PROVENANCE` note at the end of this file. Key structural findings:
+
+### The Windows kernel driver is stock Cypress EZ-USB
+
+`F235Lib.sys` is the DDK "GenericUSB" sample (exports `GenericRegisterForIdleDetection`,
+`StartPacket`, `StallRequests`…); `F235Ldr.sys` is the stock EZ-USB `Ezusb_StartDevice`
+fxload; `F135usb2.sys`/`F235usb2.sys`/`FX35usb2.sys` are thin per-model PnP dispatch
+shims. **The driver carries no Pakon protocol knowledge** — it just wraps bulk and
+control transfers behind generic IOCTLs. All protocol logic lives in user space in
+the `TLA/TLB/TLC.dll` layer. The device is exposed as the symlink `\\.\Pakon135`
+(or `\\.\PakonX35`).
+
+### Two device IOCTLs map directly to our libusb calls
+
+**Command frames — `IOCTL 0x222090`** (`TLC.dll FUN_1000c800`): a single
+bidirectional `DeviceIoControl` that the driver fulfils as an EP1 OUT→IN round
+trip:
+
+```
+DeviceIoControl(dev, 0x222090,
+                packet, packet[1] + 2,   // input  = frame, length = count + 2
+                reply,  0x40,            // output = reply, <= 64 bytes
+                &nret, OVERLAPPED);
+WaitForSingleObject(replyEvent, 2000);   // 2 s reply timeout
+// then validate reply[0] per the "type byte" table above (7 = success)
+```
+
+- Independently **confirms our wire length = `count + 2`** (no 36-byte padding).
+- Maps to libusb: bulk OUT `0x01` (len `count+2`) then bulk IN `0x81` (≤64 B) —
+  exactly what `pakon_cmd` does. The 2 s reply timeout is the OEM value.
+
+**EP0 vendor/class control — `IOCTL 0x222059`** = `IOCTL_EZUSB_VENDOR_OR_CLASS_REQUEST`
+(`TLC.dll FUN_1001db50`): a 10-byte setup buffer (`[4]=bRequest`, `[5..6]=wValue`,
+`[7..8]=wIndex`), data stage ≤ `0x5000` bytes. The code **validates
+`bRequest ∈ {0xA0} ∪ {0xA2..0xAC}`** — this defines the entire vendor-request code
+space (previously "undocumented, do not guess"). `0xA0` = FX2 RAM load; the
+`0xA4`/`0xA9` calibration-table pair sits in range. Maps to `pakon_usb_control()`.
+
+### Parameters are written via a generic `WriteRegister` helper
+
+Scan/calibration parameters are **not** bespoke packets. They funnel through a
+register-write helper family (`TLA.dll FUN_1000e510(commObj, ctx, address, reg,
+value16, flags)`, short form `FUN_1002f880(this, ctx, reg, value, flags)`) that
+emits `type=0x02` frames `02 <count> <address> <reg> <value…>`. The address space
+is wider than PICL/PICM — e.g. `0x82` is the CCD/exposure controller. So the
+advance write `02 05 24 02 a5 1c 25` is `WriteRegister(addr=0x24 PICM, reg=0x02,
+value=24-bit 0x251ca5)` (see "Advance duration parameter" below).
+
+### Scan engine is a producer/consumer ring buffer (not a poll loop)
+
+`CiScanner::bScanStrips` (`TLC.dll FUN_10032420`) spawns two threads — a
+driver-read thread doing **free-running overlapped `ReadFile` on bulk-IN `0x86`**
+(priority raised to above-normal; `ERROR_IO_PENDING` is the normal return) and a
+write-to-disk thread — backed by a ring buffer. State variables (from its debug
+template): `iStopScan, StopDriver, DriverRunning, StopTransfer, TransferInProgress,
+overflow, EndTime, Reading, ToRead, Writing, NF`; events `EventScanPacketReady`,
+`EventScanWriteToDisk`. It stops on a device end-signal / `StopScan`, **not** on a
+fixed byte count — consistent with our end-of-roll-white auto-stop approach.
+
+### OEM-enforced scan parameter ranges (use as SANE option bounds)
+
+From the scan-request validator in `TLA.dll`:
+
+| param | range |
+|---|---|
+| `iHeight` | 100 – 2114 (0x842) |
+| `iOffset` | 6–650, or 3–325 (mode-dependent) |
+| `iMotorSpeed` | 60–2200 (0x3c–0x898), or 200–3700 |
+| `iStepperLens` | 0 – 2046 (0x7fe) |
+| `iStepperCCD` (+adjust) | ∈ [0, 0x4d9) |
+
+Full calibration block (per channel R/G/B + Ir, with open-gate variants):
+`Gain_*`, `Offset_*`, `Current_*`, `DutyCycle_*`, `CcdExposure_*`, `IrLEDStartTime`,
+`LampLevel`, `uiCcdIntegrationTime`, `SpliceDarkness`, `DetectWhite_G`, `DetectFilm_G`.
 
 ## Command frame — CONFIRMED wire format
 
@@ -376,9 +483,14 @@ PICL (`0x20`) over the same EP1 command channel as scanning.
 ### Advance duration parameter (`02 05 24 02 a5 1c 25`)
 
 The three bytes `[0xa5, 0x1c, 0x25]` written to PICM register `0x02` encode the
-advance duration. The TLX Windows software accepts this value in **seconds** from
-the user — the exact binary encoding (fixed-point, BCD, or raw integer in some
-unit) is **TBD** from additional captures at known durations.
+advance duration. This frame is the generic `WriteRegister(addr=0x24, reg=0x02,
+value)` (see "Host transport" above), with the value being a **24-bit little-endian
+integer** (`0x251ca5` = 2,432,165). The TLX Windows software accepts a value in
+**seconds** from the user; the exact seconds→24-bit arithmetic is computed in the
+TLA motor controller and is **TBD** (decompilation confirmed the wire shape but not
+the formula — pin it by diffing two `advance.pakscan` captures at known durations).
+**We keep the current verbatim-replay advance; this encoding is documented, not
+required.**
 
 ### `pakon_replay` advance mode
 
@@ -391,3 +503,21 @@ unit) is **TBD** from additional captures at known durations.
 Each "step" = `a0` (start) → poll HOST until `PS_SUCCESS` (frame in position)
 → `a2` (finalize). `--limit SEC` is a wall-clock safety cap (default 60 s);
 `--timeout MS` is the USB per-transfer timeout (default 1000 ms).
+
+## PROVENANCE
+
+The protocol facts in this file come from two sources, kept distinct:
+
+1. **Our own USB captures** of the working scanner (`tools/analyze_capture.py`,
+   `test/captures/`) — the primary, clean source.
+2. **Reverse engineering of the original Kodak/Pakon Windows software** (Ghidra
+   decompilation of `tlx/TLA/TLB/TLC.dll`), done **for interoperability** to
+   corroborate and fill gaps in (1). Sections marked "OEM decompilation" above
+   derive from this.
+
+The OEM binaries and the Ghidra decompilation output are **third-party
+copyrighted material and are NOT committed to this repository** (the working copy
+lives outside the tree, under `pakon-scanning-software/` and `re/`, both
+git-ignored). This SANE backend is an independent implementation; only
+factual interface details (IOCTL numbers, request codes, wire shapes, value
+ranges) needed for interoperability are recorded here.

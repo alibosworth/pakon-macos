@@ -4,7 +4,26 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31 (Phase 6 complete: Python web service built and running)._
+_Last updated: 2026-05-31 (OEM software decompiled — protocol corroborated end to end)._
+
+**OEM Windows software reverse-engineered (2026-05-31).** Cloned the original
+Kodak/Pakon software (`pakon-scanning-software/`, git-ignored) and decompiled the
+user-space stack with Ghidra (workspace in `re/`, git-ignored; findings in
+`re/out/FINDINGS.md` and folded into `docs/PROTOCOL.md` → "Host transport"). Net:
+- **Kernel driver is stock Cypress EZ-USB** (`F235Lib.sys` = DDK GenericUSB sample);
+  all protocol logic is user-space in `TLA/TLB/TLC.dll`. Don't bother with the `.sys`.
+- **Command path = `IOCTL 0x222090`** (atomic EP1 OUT→IN), input length `count+2`
+  (confirms our wire format), reply `[0]==7` = success, 2 s timeout.
+- **EP0 vendor control = `IOCTL 0x222059`** (`IOCTL_EZUSB_VENDOR_OR_CLASS_REQUEST`),
+  **bRequest space = `0xA0` / `0xA2..0xAC`** (was "do not guess").
+- **Status-byte model confirmed** via the `EC_DRV_*` error table.
+- **Params written via a generic `WriteRegister(addr,reg,value)`** emitting `02`
+  frames; advance duration = 24-bit value at PICM reg `0x02` (kept as verbatim
+  replay — encoding formula still TBD, per decision to leave advance as-is).
+- **Scan = producer/consumer ring buffer** (free-running overlapped bulk-IN read),
+  stop on device end-signal not byte count — matches our end-of-roll-white autostop.
+- **NEXT: decompiling `PakonIMAu.dll`** for the C-41 orange-mask / density-space
+  inversion (open Q2) and to double-check interleave/trilinear geometry.
 
 **Phase 5 WORKS on hardware:** `pakon_replay --scan` drove a full scan from our
 code and pulled **239,984,640 image bytes** (4-frame COLOR strip, 11719 reads,
