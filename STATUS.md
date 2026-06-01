@@ -4,7 +4,9 @@ Working spec is `PAKON_SANE_PLAN.md`; living protocol notes in `docs/PROTOCOL.md
 the project skill `.claude/skills/pakon-scanner/SKILL.md` has the operational
 guide. This file is the short "where we left off" snapshot.
 
-_Last updated: 2026-05-31 (OEM software decompiled — protocol corroborated end to end)._
+_Last updated: 2026-06-01 (C/scanning side DONE & hardware-validated incl. a real
+negative; remaining work is Python decode — C-41 inversion + dual-tap seam. See the
+NEXT TASK section.)_
 
 **OEM Windows software reverse-engineered (2026-05-31).** Cloned the original
 Kodak/Pakon software (`pakon-scanning-software/`, git-ignored) and decompiled the
@@ -179,6 +181,46 @@ algorithm, (3) driven C backend.
   3. Magenta cast = naive linear invert (the separate C-41 orange-mask / "the look"
      work, docs/IMAGING.md).
 ### >>> NEXT TASK (resume here after a context clear) <<<
+
+**The C / scanning side is DONE. All remaining work is PYTHON decode in
+`tools/pakon_image.py`.** Two tasks, in priority order:
+
+1. **C-41 INVERSION (primary — this is the "figure it out" piece).** The scans are
+   raw negatives with the C-41 orange mask, so naive `max-raw` comes out magenta
+   (see the preview PNGs from this session). Implement a proper C-41 inversion:
+   per-channel film-base (Dmin) subtraction in DENSITY (log) space + gray-balance +
+   tone scale → positive. The OEM approach is the Ansel **SCP `modifyDmin=true`**
+   stage — full pipeline in `docs/IMAGING.md`. Sample the film base from the real
+   rebate/clear unexposed border (NOT the bright blank scene). 
+   **Testable now** on the HiRes 4-frame negs: this laptop had `/tmp/neg4*.raw`;
+   originals are on the OTHER Mac (`scan.raw` etc.). Decode deps: a venv with
+   `numpy pillow tifffile` (this session used `/tmp/pakvenv`).
+2. **Dual-tap seam fix (route 1, secondary — needs a LowRes scan to validate).**
+   LowRes/full-roll frames have a magenta/cyan tint seam down the middle (the two
+   CCD taps have different per-channel gain). Fix in `pakon_image.py` with a
+   per-channel gain+offset fit across the seam boundary (measured:
+   `a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets; see the "dual-tap" section
+   below). Only matters for whole-roll (LowRes) scans; no LowRes raw was on disk
+   this session, so validate against a fresh full-roll scan.
+
+Reference (this session's findings):
+
+- **C / SCANNING SIDE IS DONE (2026-06-01).** HiRes and LowRes both capture on
+  hardware; driven CONFIGURE / dark-offset calibration / known-good teardown work;
+  firmware load + open + advance/eject work. The remaining work is all PYTHON decode.
+- **Single-tap vs dual-tap = HiRes vs LowRes (decompile-confirmed).** No "tap"
+  toggle exists; the decompile uses `HiRes` / `iResolution` / `Base8Ratio_HR_LR`
+  (4 or 8). HiRes reads the CCD through a SINGLE tap (clean color, data-heavy →
+  ~4 frames/scan, capped by `HiResMegabytesRoll`/`Total`) = our `scan.pakscan`.
+  LowRes reads through TWO taps in parallel (≈4–8× less data, whole roll fits, but
+  the two taps have a per-channel gain mismatch → magenta/cyan SEAM down each frame)
+  = `scan_fullroll`/`36frames`. Wire tell: PICL `02 05 20 02 06 00 XX` = 0x0200/0x2000
+  (HiRes) vs 0x0400/0x4000 (LowRes), a clean 2× readout-rate. Decision: scan LowRes
+  for whole rolls and fix the dual-tap seam in `pakon_image.py` (route 1).
+- **Dual-tap seam fix (Python, route 1) — SPEC, needs a LowRes scan to validate.**
+  Per STATUS measurements: per-channel linear fit (gain+offset) across the seam
+  maps left tap → right tap (`a[r]=0.866, a[g]=0.637, a[b]=0.697` + offsets). NOT
+  yet testable (no LowRes raw on disk). Implement when a LowRes scan is available.
 
 - **ROOT CAUSE of driven-scan incompleteness CONFIRMED (2026-06-01).** A real-film
   driven `--scan-sm` scanned only ~3/4 of the strip then went DARK (flat ~317) for
