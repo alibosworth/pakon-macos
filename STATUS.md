@@ -136,9 +136,34 @@ algorithm, (3) driven C backend.
     `Current_R/G/B/Ir, Duty_R/G/B/Ir, IntegrationTime` + temps/RPMs; section
     parsers `FN_bEEPromReadSection`, `FN_GetCalibrateInfo{ColorMatrix,Light,Dpi}`
     (TLC.c ~22583+). 0xA4/0xA9 issued via TLC `FUN_1001db50` / TLA `FUN_1001ac60`.
+- **Milestone 3 → SYNTHESIZED CONFIGURE works on hardware (2026-05-31).**
+  `pakon_calib_config` + `pakon_calib_default_config()` (the OEM's FINAL converged
+  values from the capture) + `pakon_calib_configure(dev,cfg)` write the full
+  calibration register set to addr 0x24 from C — capture-free, not replayed.
+  `pakon_replay --configure [--prelude FILE]` ran on hardware: all 17 register
+  writes accepted (gain 13/13/13, offset −38/−31/−31, height 0x0c1a, control
+  0x0160, timing 4/5/9/0xa, AFE 0/1). EEPROM **drift detection** (`--read-params`
+  checksums vs `PAKON_CALIB_EEPROM_CKSUM_R1/R2`) confirms the defaults match this
+  unit. KEY: CcdExposure regs 0x82.1/2/3 are 0 in the OEM final state — integration
+  is via timing regs 4/5/9/0xa (why the earlier --cal-exposure sweep did nothing).
+  Unit-tested; on main.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — decode the cached-calibration table sections.** The table is read
+**Milestone 3 — wire CONFIGURE into a full DRIVEN scan (replace verbatim --scan).**
+The pieces now exist capture-free: OPEN handshake (synthesized), param-table read +
+drift check (`--read-params`), CONFIGURE (`pakon_calib_configure`, hardware-accepted),
+dark-offset live refine (hardware-validated). Remaining: the PIC/CCD **init
+boilerplate** before CONFIGURE is still replayed from `resources/calib_prelude.pakscan`
+(the `97 01` PIC init, `12345` ID reads, PICL bring-up, `8b/8c/8d/8f` LED geometry,
+control toggles) — synthesize that in C too (it's fixed, non-calibration), then drive
+the scan/readout + teardown from C. Then milestone 3 (driven backend) is complete.
+
+Optional later: decode the EEPROM table sections (ColorMatrix for rendering "the
+look"; LED Current/Duty) — only needed for rendering, not for capturing.
+
+(Earlier sub-goal, superseded: decode the cached-calibration table struct fully —
+deferred; the synthesized-CONFIGURE + checksum-drift approach reaches a reproducible
+scan without it.) The table is read
 (`pakon_replay --read-params`); now map its fields by tracing the OEM parser in the
 decompile: `FN_bEEPromReadSection` + `FN_GetCalibrateInfoColorMatrix/Light/Dpi`
 (TLC.c ~22583+, and the 0xA9 reader `FUN_1001db50`/`FUN_1001ac60`). Goal: extract

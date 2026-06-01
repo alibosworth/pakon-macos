@@ -991,6 +991,18 @@ static int do_read_params(unsigned timeout, const char *outpath)
         printf("\n");
     }
 
+    /* drift detection: compare the region checksums to the baseline */
+    if (valid[0x04]) {
+        uint32_t c1 = (uint32_t)(table[0x04] | (table[0x05]<<8) | (table[0x06]<<16) | (table[0x07]<<24));
+        printf("\nregion1 checksum 0x%08x %s baseline 0x%08x\n", c1,
+               c1 == PAKON_CALIB_EEPROM_CKSUM_R1 ? "==" : "!=", PAKON_CALIB_EEPROM_CKSUM_R1);
+    }
+    if (valid[0x804]) {
+        uint32_t c2 = (uint32_t)(table[0x804] | (table[0x805]<<8) | (table[0x806]<<16) | (table[0x807]<<24));
+        printf("region2 checksum 0x%08x %s baseline 0x%08x  (matches => default_config valid for this unit)\n",
+               c2, c2 == PAKON_CALIB_EEPROM_CKSUM_R2 ? "==" : "!=", PAKON_CALIB_EEPROM_CKSUM_R2);
+    }
+
     /* flag the OEM seed values so the fields are easy to spot */
     printf("\n=== candidate field locations (16-bit LE matches of OEM seeds) ===\n");
     struct { const char *name; uint16_t v; } seeds[] = {
@@ -1015,6 +1027,55 @@ static int do_read_params(unsigned timeout, const char *outpath)
     return errs ? 1 : 0;
 }
 
+/* ---- synthesized CONFIGURE (capture-free register programming) ------------
+ * Open + (optional) init prelude + write the calibration register set from C
+ * defaults (the OEM's validated converged values), instead of replaying frozen
+ * captured writes. Proves we can program the calibration independently. */
+static int do_configure(unsigned timeout, const char *prelude)
+{
+    pakon_ctx *ctx = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK) { fprintf(stderr, "init failed\n"); return 1; }
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open device failed: %s (need operational f135)\n",
+                pakon_result_str(r));
+        pakon_usb_exit(ctx); return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev); pakon_usb_exit(ctx); return 1;
+    }
+    if (prelude) {
+        long np = calib_replay_prelude(dev, prelude, timeout);
+        printf("prelude '%s' replayed (%ld commands)\n", prelude, np);
+    } else {
+        for (size_t i = 0; i < sizeof(OPEN_SEQ)/sizeof(OPEN_SEQ[0]); i++) {
+            const open_step *s = &OPEN_SEQ[i];
+            pakon_packet cmd, reply;
+            pakon_packet_build(&cmd, s->out[0], s->out + 2, s->out[1]);
+            pakon_cmd(dev, &cmd, &reply, timeout);
+        }
+    }
+
+    pakon_calib_config cfg = pakon_calib_default_config();
+    r = pakon_calib_configure(dev, &cfg, timeout < 2000 ? 2000 : timeout);
+
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+
+    if (r != PAKON_OK) {
+        fprintf(stderr, "configure failed: %s\n", pakon_result_str(r));
+        return 1;
+    }
+    printf("CONFIGURE ok: programmed gain=%d/%d/%d offset=%d/%d/%d height=0x%04x "
+           "(all register writes accepted)\n",
+           cfg.gain[0], cfg.gain[1], cfg.gain[2],
+           cfg.offset[0], cfg.offset[1], cfg.offset[2], cfg.height);
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -1024,6 +1085,7 @@ static void usage(const char *argv0)
         "       %s --open                                verify open handshake\n"
         "       %s --calibrate [--cal-lines N] [--cal-verbose]  driven calibration\n"
         "       %s --read-params [--params-out FILE]      dump cached calibration table\n"
+        "       %s --configure [--prelude FILE]           program calibration regs from C\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
@@ -1049,13 +1111,13 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
 {
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
-    int want_calibrate = 0, cal_verbose = 0, want_read_params = 0;
+    int want_calibrate = 0, cal_verbose = 0, want_read_params = 0, want_configure = 0;
     unsigned long cal_lines = 32;
     unsigned long cal_exposure = 256;
     const char *cal_prelude = NULL;
@@ -1079,6 +1141,8 @@ int main(int argc, char **argv)
             want_calibrate = 1;
         } else if (!strcmp(argv[i], "--read-params")) {
             want_read_params = 1;
+        } else if (!strcmp(argv[i], "--configure")) {
+            want_configure = 1;
         } else if (!strcmp(argv[i], "--params-out") && i + 1 < argc) {
             params_out = argv[++i];
         } else if (!strcmp(argv[i], "--cal-lines") && i + 1 < argc) {
@@ -1118,14 +1182,16 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!want_open && !want_calibrate && !want_read_params && !scan_file &&
-        !scan_sm_file && !advance_file) {
+    if (!want_open && !want_calibrate && !want_read_params && !want_configure &&
+        !scan_file && !scan_sm_file && !advance_file) {
         usage(argv[0]);
         return 2;
     }
 
     if (want_read_params)
         return do_read_params(timeout < 2000 ? 2000 : timeout, params_out);
+    if (want_configure)
+        return do_configure(timeout, cal_prelude);
     if (want_calibrate)
         return do_calibrate(timeout, (size_t)cal_lines, cal_verbose, cal_prelude,
                             (unsigned)cal_exposure);
