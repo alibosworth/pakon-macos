@@ -31,7 +31,8 @@ from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .decode import WORK_DIR, decode_raw, make_contact_sheet
+from .decode import (WORK_DIR, PREVIEW_PATH, prescan, export_frames,
+                     make_contact_sheet)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -52,7 +53,8 @@ _executor = ThreadPoolExecutor(max_workers=1)
 _state: dict = {
     "scan_path": None,   # Path to the last .raw file
     "out_dir": Path.home(), # host dir the next scan writes scan.raw into
-    "frames": [],        # list of {"index", "tiff", "thumb"}
+    "frames": [],        # list of {"index", "tiff", "thumb"} (after export)
+    "prescan": None,     # prescan() metadata (ribbon path, base, pitch, centres…)
     "processing": False,
 }
 
@@ -234,23 +236,51 @@ async def api_mkdir(path: str = Body(...), name: str = Body(...)):
     return {"path": str(new)}
 
 
-# ── Process ───────────────────────────────────────────────────────────────────
+# ── Stage 1: prescan (long preview + detected frame centres) ───────────────────
+
+def _run_job(work, on_done):
+    """Run `work(progress)` in the executor, stream progress as SSE, and call
+    on_done(result) to build the final 'done' event. Returns a StreamingResponse."""
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _progress(step: str, pct: float) -> None:
+        loop.call_soon_threadsafe(
+            queue.put_nowait, {"type": "progress", "step": step, "pct": pct})
+
+    def _runner() -> None:
+        try:
+            result = work(_progress)
+            loop.call_soon_threadsafe(queue.put_nowait, on_done(result))
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, {"type": "error", "message": str(exc)})
+
+    _executor.submit(_runner)
+
+    async def _stream():
+        try:
+            while True:
+                event = await queue.get()
+                yield _sse(event)
+                if event["type"] in ("done", "error"):
+                    break
+        finally:
+            _state["processing"] = False
+
+    return StreamingResponse(_stream(), media_type="text/event-stream",
+                             headers=_SSE_HEADERS)
+
 
 @app.post("/api/process")
-async def api_process(
-    file: UploadFile | None = File(default=None),
-    rotate: int = Form(default=90),
-    crop: float = Form(default=100.0),  # centre-crop %, 100 = full frame
-):
-    # A 36-exposure roll, the C-41 inversion, and auto channel-order are fixed by
-    # design — only rotation and an optional centre-crop are user-tunable.
+async def api_process(file: UploadFile | None = File(default=None)):
+    """Prescan: cache the ribbon, render the preview strip, detect frame centres."""
     if _state["processing"]:
         async def _busy():
             yield _sse({"type": "error", "message": "Already processing"})
         return StreamingResponse(_busy(), media_type="text/event-stream",
                                  headers=_SSE_HEADERS)
 
-    # Resolve raw file path.
     if file is not None:
         WORK_DIR.mkdir(parents=True, exist_ok=True)
         upload_path = WORK_DIR / "upload.raw"
@@ -269,43 +299,57 @@ async def api_process(
                                  headers=_SSE_HEADERS)
 
     _state["frames"] = []
+    _state["prescan"] = None
     _state["processing"] = True
 
-    loop = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
+    def _done(meta):
+        _state["prescan"] = meta
+        # hand the browser everything it needs to place crops (no ribbon path)
+        return {"type": "done", **{k: meta[k] for k in (
+            "rows", "cols", "pitch", "frame_w", "centres",
+            "preview_w", "preview_h", "scale")}}
 
-    def _progress(step: str, pct: float) -> None:
-        loop.call_soon_threadsafe(
-            queue.put_nowait, {"type": "progress", "step": step, "pct": pct}
-        )
+    return _run_job(lambda prog: prescan(raw_path, progress=prog), _done)
 
-    def _run() -> None:
-        try:
-            result = decode_raw(raw_path, rotate=rotate, crop_pct=crop,
-                                progress=_progress)
-            _state["frames"] = result
-            loop.call_soon_threadsafe(
-                queue.put_nowait, {"type": "done", "count": len(result)}
-            )
-        except Exception as exc:
-            loop.call_soon_threadsafe(
-                queue.put_nowait, {"type": "error", "message": str(exc)}
-            )
 
-    _executor.submit(_run)
+@app.get("/api/preview")
+async def api_preview():
+    if not PREVIEW_PATH.exists():
+        return JSONResponse({"error": "no preview"}, status_code=404)
+    return FileResponse(PREVIEW_PATH, media_type="image/jpeg")
 
-    async def _stream():
-        try:
-            while True:
-                event = await queue.get()
-                yield _sse(event)
-                if event["type"] in ("done", "error"):
-                    break
-        finally:
-            _state["processing"] = False
 
-    return StreamingResponse(_stream(), media_type="text/event-stream",
-                             headers=_SSE_HEADERS)
+# ── Stage 2: export the operator-confirmed crops at full resolution ─────────────
+
+@app.post("/api/export_frames")
+async def api_export_frames(
+    centres: list[int] = Body(..., embed=True),
+    rotate: int = Body(default=90, embed=True),
+):
+    meta = _state["prescan"]
+    if not meta:
+        async def _no_scan():
+            yield _sse({"type": "error", "message": "Run a scan/process first"})
+        return StreamingResponse(_no_scan(), media_type="text/event-stream",
+                                 headers=_SSE_HEADERS)
+    if _state["processing"]:
+        async def _busy():
+            yield _sse({"type": "error", "message": "Already processing"})
+        return StreamingResponse(_busy(), media_type="text/event-stream",
+                                 headers=_SSE_HEADERS)
+
+    _state["frames"] = []
+    _state["processing"] = True
+
+    def _work(prog):
+        return export_frames(meta["ribbon"], meta["base"], centres,
+                             rotate=rotate, frame_w=meta["frame_w"], progress=prog)
+
+    def _done(result):
+        _state["frames"] = result
+        return {"type": "done", "count": len(result)}
+
+    return _run_job(_work, _done)
 
 
 # ── Frame access ──────────────────────────────────────────────────────────────
@@ -341,16 +385,6 @@ async def api_tiff(n: int):
     return FileResponse(path, media_type="image/tiff", filename=f"frame_{n:02d}.tif")
 
 
-@app.get("/api/frames/{n}/raw")
-async def api_raw(n: int):
-    """Raw negative TIFF (16-bit, as scanned)."""
-    path = _frame_file(n, "raw_tiff")
-    if not path:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path, media_type="image/tiff",
-                        filename=f"frame_{n:02d}_raw.tif")
-
-
 @app.get("/api/frames/{n}/jpeg")
 async def api_jpeg(n: int):
     """Inverted positive JPEG (8-bit)."""
@@ -364,9 +398,8 @@ async def api_jpeg(n: int):
 
 # fmt -> (state key, file extension, archived name suffix)
 _EXPORT_FMTS = {
-    "raw":  ("raw_tiff", "tif", "_raw"),  # raw negative TIFF (16-bit)
-    "tiff": ("tiff",     "tif", ""),      # inverted positive TIFF (16-bit)
-    "jpeg": ("jpg",      "jpg", ""),      # inverted positive JPEG (8-bit)
+    "tiff": ("tiff", "tif", ""),   # inverted positive TIFF (16-bit, plain)
+    "jpeg": ("jpg",  "jpg", ""),   # rendered positive JPEG (rpd.pf look)
 }
 
 
@@ -443,6 +476,7 @@ async def api_clear():
 
     _state["scan_path"] = None
     _state["frames"] = []
+    _state["prescan"] = None
     _state["processing"] = False
     return {"cleared": removed}
 

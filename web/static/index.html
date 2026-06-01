@@ -192,6 +192,29 @@
 
     .hidden { display: none !important; }
 
+    /* ── Film strip / crop placement ── */
+    .strip-wrap {
+      overflow-x: auto; overflow-y: hidden;
+      background: #000; border: 1px solid var(--border); border-radius: 7px;
+      margin-top: 4px;
+    }
+    .strip-inner { position: relative; line-height: 0; }
+    #strip-img { display: block; height: auto; }
+    .cropbox {
+      position: absolute; top: 0; bottom: 0;
+      border: 2px solid rgba(91,156,246,0.5);
+      box-sizing: border-box; cursor: pointer;
+    }
+    .cropbox .lbl {
+      position: absolute; top: 2px; left: 4px;
+      font-size: 11px; color: #fff; background: rgba(0,0,0,0.5);
+      padding: 0 4px; border-radius: 3px; line-height: 1.5;
+    }
+    .cropbox.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);  /* dim everything else */
+    }
+
     /* ── Folder picker modal ── */
     .modal-backdrop {
       position: fixed; inset: 0;
@@ -295,7 +318,6 @@
     </label>
   </div>
   <div class="row" style="margin-top: 14px;">
-    <span class="msg" title="A 36-exposure roll with the OEM C-41 inversion (auto channel-order + Kodak rpd.pf render). Fixed by design.">36-exposure roll · C-41 colour</span>
     <label class="field">
       Rotate
       <select id="rotate">
@@ -304,10 +326,6 @@
         <option value="180">180°</option>
         <option value="270">270°</option>
       </select>
-    </label>
-    <label class="field" title="Keep this % of the frame centre; trims the edge rebate/gap band. 100 = full frame">
-      Crop %
-      <input type="number" id="crop" value="100" min="50" max="100" step="1">
     </label>
     <button id="proc-btn" disabled>Process</button>
   </div>
@@ -318,7 +336,30 @@
   <div class="msg" id="proc-msg" style="margin-top: 8px;"></div>
 </div>
 
-<!-- Frames -->
+<!-- Confirm frames (minilab-style crop placement) -->
+<div class="card hidden" id="confirm-card">
+  <div class="frames-header">
+    <h2 id="confirm-title">Confirm frames</h2>
+    <div class="row">
+      <span class="msg" id="confirm-hint">← → nudge · ↑ ↓ prev/next · Enter next · click to place</span>
+      <button class="ghost" id="frame-add">+ Add</button>
+      <button class="ghost" id="frame-del">− Remove</button>
+      <button id="export-btn">Export <span id="export-count"></span> frames</button>
+    </div>
+  </div>
+  <div class="strip-wrap" id="strip-wrap">
+    <div class="strip-inner" id="strip-inner">
+      <img id="strip-img" alt="film strip">
+      <!-- crop boxes injected here -->
+    </div>
+  </div>
+  <div class="progress-wrap" id="exp-prog-wrap">
+    <progress id="exp-prog" value="0" max="1"></progress>
+    <div class="progress-label" id="exp-prog-label"></div>
+  </div>
+</div>
+
+<!-- Frames (after export) -->
 <div class="card hidden" id="frames-section">
   <div class="frames-header">
     <h2 id="frames-title">Frames</h2>
@@ -327,7 +368,6 @@
       <button class="ghost" id="export-jpeg">JPEGs</button>
       <button class="ghost" id="export-contact">Contact sheet</button>
       <button class="ghost" id="export-tiff">TIFFs</button>
-      <button class="ghost" id="export-raw">Raw negatives</button>
       <button class="ghost" id="clear-btn" style="border-color: var(--red); color: var(--red);">Clear</button>
     </div>
   </div>
@@ -570,19 +610,22 @@
     $('proc-btn').disabled = false;
   });
 
-  // ── Process ──────────────────────────────────────────────────────────────
+  // ── Process = prescan (long preview + detected frame centres) ──────────────
+  let meta = null;      // prescan metadata
+  let crops = [];       // confirmed crop centres (full-res rows)
+  let cur = 0;          // current frame index
+
   $('proc-btn').addEventListener('click', async () => {
     const btn = $('proc-btn');
     btn.disabled = true;
     setMsg($('proc-msg'), '');
     $('proc-prog-wrap').classList.add('show');
     $('proc-prog').value = 0;
+    $('confirm-card').classList.add('hidden');
     $('frames-section').classList.add('hidden');
     $('frames-grid').innerHTML = '';
 
     const fd = new FormData();
-    fd.append('rotate', $('rotate').value);
-    fd.append('crop',   $('crop').value);
     if (uploadFile) fd.append('file', uploadFile);
 
     await postSSE('/api/process', fd, ev => {
@@ -592,26 +635,126 @@
       } else if (ev.type === 'done') {
         $('proc-prog').value = 1;
         $('proc-prog-label').textContent = 'Done';
-        setMsg($('proc-msg'), `${ev.count} frame${ev.count !== 1 ? 's' : ''} processed`, 'ok');
-        loadFrames();
+        meta = ev;
+        startConfirm();
+        setMsg($('proc-msg'),
+               `${ev.centres.length} frames detected — confirm crops below`, 'ok');
       } else if (ev.type === 'error') {
         setMsg($('proc-msg'), ev.message, 'err');
       }
     });
-
     btn.disabled = false;
   });
 
-  // ── Frames grid ──────────────────────────────────────────────────────────
+  // ── Confirm frames (interactive crop placement) ────────────────────────────
+  function startConfirm() {
+    crops = meta.centres.slice();
+    cur = 0;
+    $('strip-img').src = '/api/preview?t=' + Date.now();
+    $('strip-inner').style.width = meta.preview_w + 'px';
+    $('confirm-card').classList.remove('hidden');
+    renderStrip();
+    $('strip-wrap').focus();
+  }
+
+  const fullToPx = c => c * meta.scale;                 // full row -> preview x
+  const boxW = () => meta.frame_w * meta.scale;
+
+  function renderStrip() {
+    const inner = $('strip-inner');
+    inner.querySelectorAll('.cropbox').forEach(e => e.remove());
+    const w = boxW();
+    crops.forEach((c, i) => {
+      const box = document.createElement('div');
+      box.className = 'cropbox' + (i === cur ? ' active' : '');
+      box.style.left = (fullToPx(c) - w / 2) + 'px';
+      box.style.width = w + 'px';
+      box.innerHTML = `<span class="lbl">${i + 1}</span>`;
+      box.onclick = () => { cur = i; renderStrip(); };
+      inner.appendChild(box);
+    });
+    $('confirm-title').textContent =
+      `Confirm frames — ${cur + 1} / ${crops.length}`;
+    $('export-count').textContent = crops.length;
+    // keep the active box in view
+    const wrap = $('strip-wrap'), x = fullToPx(crops[cur]);
+    if (x < wrap.scrollLeft + 80 || x > wrap.scrollLeft + wrap.clientWidth - 80)
+      wrap.scrollLeft = x - wrap.clientWidth / 2;
+  }
+
+  function nudge(dpx) {                  // dpx in preview pixels -> full rows
+    crops[cur] = Math.max(0, Math.min(meta.rows,
+      crops[cur] + Math.round(dpx / meta.scale)));
+    renderStrip();
+  }
+  const step = () => Math.max(4, Math.round(meta.pitch * 0.004));  // micro (full rows)
+  function go(d) { cur = Math.max(0, Math.min(crops.length - 1, cur + d)); renderStrip(); }
+  function addFrame() {
+    const c = Math.min(meta.rows, crops[crops.length - 1] + meta.pitch);
+    crops.push(c); cur = crops.length - 1; renderStrip();
+  }
+  function delFrame() {
+    if (crops.length <= 1) return;
+    crops.splice(cur, 1); cur = Math.min(cur, crops.length - 1); renderStrip();
+  }
+
+  $('frame-add').addEventListener('click', addFrame);
+  $('frame-del').addEventListener('click', delFrame);
+
+  // click on the strip background to place the current crop there
+  $('strip-inner').addEventListener('click', e => {
+    if (e.target.closest('.cropbox')) return;
+    const rect = $('strip-inner').getBoundingClientRect();
+    crops[cur] = Math.round((e.clientX - rect.left) / meta.scale);
+    renderStrip();
+  });
+
+  // keyboard: ←/→ nudge (Shift = coarse), ↑/↓ prev/next, Enter next
+  window.addEventListener('keydown', e => {
+    if ($('confirm-card').classList.contains('hidden')) return;
+    const k = e.key, big = e.shiftKey ? 6 : 1;
+    if (k === 'ArrowLeft')       { nudge(-step() * big * meta.scale); }
+    else if (k === 'ArrowRight') { nudge(step() * big * meta.scale); }
+    else if (k === 'ArrowUp')    { go(-1); }
+    else if (k === 'ArrowDown' || k === 'Enter') { go(1); }
+    else return;
+    e.preventDefault();
+  });
+
+  // ── Export the confirmed crops at full resolution ──────────────────────────
+  $('export-btn').addEventListener('click', async () => {
+    const btn = $('export-btn');
+    btn.disabled = true;
+    $('exp-prog-wrap').classList.add('show');
+    $('exp-prog').value = 0;
+    $('frames-section').classList.add('hidden');
+    $('frames-grid').innerHTML = '';
+
+    await postSSE('/api/export_frames',
+      { centres: crops.map(c => Math.round(c)), rotate: parseInt($('rotate').value) },
+      ev => {
+        if (ev.type === 'progress') {
+          $('exp-prog').value = ev.pct;
+          $('exp-prog-label').textContent = ev.step;
+        } else if (ev.type === 'done') {
+          $('exp-prog').value = 1;
+          $('exp-prog-label').textContent = 'Done';
+          loadFrames();
+        } else if (ev.type === 'error') {
+          $('exp-prog-label').textContent = ev.message;
+        }
+      });
+    btn.disabled = false;
+  });
+
+  // ── Frames grid (after export) ─────────────────────────────────────────────
   async function loadFrames() {
     const frames = await fetch('/api/frames').then(r => r.json());
     if (!frames.length) return;
-
     $('frames-section').classList.remove('hidden');
     $('frames-title').textContent = `Frames (${frames.length})`;
     const grid = $('frames-grid');
     grid.innerHTML = '';
-
     for (const { index } of frames) {
       const n2 = String(index).padStart(2, '0');
       const card = document.createElement('div');
@@ -622,8 +765,6 @@
         <div class="frame-footer">
           <span class="frame-num">Frame ${index}</span>
           <span>
-            <a href="/api/frames/${index}/raw"  download="frame_${n2}_raw.tif">raw</a>
-            &nbsp;·&nbsp;
             <a href="/api/frames/${index}/tiff" download="frame_${n2}.tif">TIFF</a>
             &nbsp;·&nbsp;
             <a href="/api/frames/${index}/jpeg" download="frame_${n2}.jpg">JPG</a>
@@ -633,8 +774,7 @@
     }
   }
 
-  // ── Export zip ───────────────────────────────────────────────────────────
-  $('export-raw').addEventListener('click',     () => window.location = '/api/export?fmt=raw');
+  // ── Export zip / contact sheet ─────────────────────────────────────────────
   $('export-tiff').addEventListener('click',    () => window.location = '/api/export?fmt=tiff');
   $('export-jpeg').addEventListener('click',    () => window.location = '/api/export?fmt=jpeg');
   $('export-contact').addEventListener('click', () => window.location = '/api/contact');
@@ -644,6 +784,8 @@
     if (!confirm('Clear the current scan and delete decoded temp files?\n'
                  + '(A scan.raw saved to your output folder is kept.)')) return;
     await fetch('/api/clear', { method: 'POST' });
+    meta = null; crops = []; cur = 0;
+    $('confirm-card').classList.add('hidden');
     $('frames-section').classList.add('hidden');
     $('frames-grid').innerHTML = '';
     $('frames-title').textContent = 'Frames';
