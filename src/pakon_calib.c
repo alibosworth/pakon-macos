@@ -220,6 +220,7 @@ pakon_result pakon_calib_run(pakon_dev *dev, const pakon_calib_opts *opts,
     if (opts) o = *opts;
     if (o.nlines == 0)     o.nlines = 32;
     if (o.timeout_ms == 0) o.timeout_ms = 2000;
+    if (o.exposure == 0)   o.exposure = 256;   /* nominal gain-phase integration */
     if (o.col1 == 0)       { o.col0 = 100; o.col1 = 1900; }  /* visible window */
     if (!opts)             { o.do_dark = 1; o.do_gain = 1; }
 
@@ -272,6 +273,13 @@ pakon_result pakon_calib_run(pakon_dev *dev, const pakon_calib_opts *opts,
         double factor[3] = {1.0, 1.0, 1.0};
         unsigned mean[3] = {0,0,0}, peak[3] = {0,0,0};
         int conv[3] = {0,0,0};
+        /* Program a nominal exposure on all channels so the CCD integrates real
+         * light (the OEM sets this in its gain loop; without it the sensor reads
+         * dark). bank 0x82 regs 1/2/3 = CcdExposure R/G/B. */
+        const uint8_t exp_reg[3] = {PAKON_REG_EXPOSURE_R, PAKON_REG_EXPOSURE_G, PAKON_REG_EXPOSURE_B};
+        for (int k = 0; k < 3; k++)
+            calib_write_reg(dev, PAKON_BANK_TIMING, exp_reg[k],
+                            pakon_calib_enc_exposure((int)o.exposure), o.timeout_ms);
         for (unsigned it = 0; it < PAKON_CALIB_GAIN_ITERS; it++) {
             for (int k = 0; k < 3; k++)
                 calib_write_reg(dev, PAKON_BANK_AFE, bank_gain_reg[k],

@@ -75,38 +75,60 @@ algorithm, (3) driven C backend.
     [`--cal-lines N`] [`--cal-verbose`] opens, runs the open handshake, then the
     driven loop, and prints converged gain/offset next to the OEM seeds.
   - `test/test_calib.c` (15+ asserts) wired into ctest; all 3 suites green.
-  - **NEEDS-HARDWARE seam:** `calib_acquire` (kick `8a`+host-arm, read `0x86`).
-    Whether open-gate lines stream without the motor is the thing to learn on the
-    box. Caveat printed if dark/white read ~0 (acquisition spine needs extending).
+  - `calib_acquire` (kick `8a`+host-arm, read `0x86`); `--prelude FILE` replays a
+    captured CCD/lamp setup spine before the loops; `--cal-exposure N` sets the
+    gain-phase integration.
+
+- **Milestone 3 HARDWARE-TESTED (2026-05-31, scanner on the Mac directly).**
+  Firmware-loaded f235→f135, open handshake → Idle, then ran `--calibrate`:
+  - ✅ **DARK-OFFSET PHASE VALIDATED ON HARDWARE.** With `--prelude
+    resources/calib_prelude.pakscan`, offsets converge to **−37/−36/−36**
+    (OEM seed −45) and dark_mean to ~270 (target 300±32) in ~3 iters. The full
+    measure→adjust→write machinery works against the real CCD. Trace: it0
+    mean=5719→off −41; it1 mean~130; it2 mean~270 converged.
+  - ❌ **GAIN PHASE BLOCKED — no illumination in static calibration.** Open-gate
+    peak reads ~480–530 (dark noise) and is **flat across exposure 256/1024/2048**
+    (`--cal-exposure` sweep), so it is NOT an exposure problem — there is simply no
+    light. The lamp/LED is NOT activated by the static register prelude (the
+    spine's PICL `80 01`/`80 00` toggle leaves it off). This matches the STATUS
+    "Anatomy of scan.raw" note: the bright open-gate "blank pre-load scan" only
+    appears **while the motor runs** ⇒ **F-135 illumination is gated by the running
+    scan engine, not a static register.**
+  - Side note: writing gain `0x3f` (max) zeroes the readout (AFE saturation quirk);
+    harmless since real gain is ~13, but don't drive gain to 63.
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 hardware bring-up: run `pakon_replay --calibrate` on the Linux box
-and tune the acquisition seam.** The algorithm + register path are implemented and
-unit-tested; the open question is the open-gate (no-motor) acquisition handshake.
+**Milestone 3 — unblock the GAIN phase: get open-gate illumination.** Dark-offset
+is done & hardware-validated. The gain loop needs the open-gate white (~48900) the
+OEM sees, but the F-135 lamp does not come on from static register writes. Two
+avenues (the scanner connects directly to the Mac now — no SSH/sudo):
 
-On the Linux box (scanner operational `f135`, **open gate / no film**):
+1. **Calibrate with the motor running (most promising).** The OEM's bright
+   open-gate light is the "blank pre-load scan" — i.e. it scans (motor on, lamp on)
+   with no film. Drive a slow advance / scan-engine start (`04 03 24 00 a0` motor +
+   the PICL `8a` readout) concurrently with the gain measurement, gate open / no
+   film, and measure the streaming `0x86`. Adapt `pakon_calib_run` to start the
+   engine for the gain phase (or add a `--gain-with-motor` path).
+2. **Find the explicit F-135 lamp-enable** by decompiling the F-135 illumination
+   path (TLA's `FUN_10033c70`/addr 0xf6 is F-235/335; the F-135 equivalent lives in
+   the PICL `0x20` bank `0x80/0x87/0x89/0xd0/0xd1` writes — instrument which one
+   raises the CCD level).
+
+To reproduce the hardware test (scanner on the Mac, gate open, no film):
 ```sh
-git pull --ff-only origin main && cmake --build build
-sudo ./build/pakon_replay --calibrate --cal-verbose
+./build/pakon_probe                                   # if cold f235:
+./build/pakon_probe --load-firmware resources/f135.pakfw   # -> f135
+PAKON_DEBUG=2 ./build/pakon_replay --calibrate \
+    --prelude resources/calib_prelude.pakscan --cal-verbose
 ```
-Expected if the acquisition spine works: dark_mean converges to ~300 and gain
-lands near the OEM seed (**gain≈13, offset≈−45**). Paste the printed result + any
-`PAKON_DEBUG=3` trace back here.
+`resources/calib_prelude.pakscan` = scan.pakscan up to the first image read
+(static CCD setup, no motor); regenerate with
+`awk '/^M /{exit}1' resources/scan.pakscan > resources/calib_prelude.pakscan`.
 
-If dark_mean/white_peak read ~0, the CCD isn't streaming open-gate lines from just
-the OPEN handshake + `8a` kick — then extend the init spine in `calib_acquire` /
-`do_calibrate` using the pre-motor portion of `resources/scan.pakscan` (everything
-before `04 03 24 00 a0`), which is the OEM's real calibration-phase setup.
-
-Remaining unknowns (do NOT block the above; confirm on hardware):
-- **F-135 illumination/lamp control** — proceed with device-default illumination
-  for the first run; decode the F-135 lamp path later if gain won't converge.
-- `.data` target constants (`_DAT_1006f268`≈64000, gain `k`≈1/64) — read back on hw.
-- **Exposure phase** (6-pt OLS) not yet ported — add after offset+gain track the OEM.
-
-What to do with the scanner (milestone-3 test): implement steps 1–3 as a driven
-CALIBRATE state, run on the Linux box, and check the loop converges near the seed
-values above (gain≈13, offset≈−45). That match is the success signal.
+Other deferred items:
+- `.data` target constants (`_DAT_1006f268`≈64000, gain `k`≈1/64) — confirm once
+  the gain loop sees real light.
+- **Exposure phase** (6-pt OLS) not yet ported — add after gain converges.
 
 Environment note: this work mines the **Ghidra dumps `re/out/TLA.c` / `TLC.c`**,
 which are **git-ignored and exist only on the Mac** (regenerate via

@@ -158,6 +158,7 @@ typedef struct {
     size_t   nlines;        /* CCD lines to accumulate per measurement (def 32) */
     size_t   col0, col1;    /* measurement column window (def: central 3..N)    */
     unsigned timeout_ms;    /* per-transfer timeout (def 2000)                  */
+    unsigned exposure;      /* nominal CcdExposure for the gain phase (def 256) */
     int      do_dark;       /* run the dark-offset phase (def 1)                */
     int      do_gain;       /* run the gain phase (def 1)                       */
     int      verbose;       /* log each iteration                               */

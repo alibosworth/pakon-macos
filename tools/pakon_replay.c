@@ -798,7 +798,46 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
  * NEEDS-HARDWARE: this assumes the open gate (no film) is presented. The CCD
  * init beyond the OPEN handshake may need extending on hardware (see
  * pakon_calib_run / calib_acquire). Run on the Linux box and iterate. */
-static int do_calibrate(unsigned timeout, size_t nlines, int verbose)
+/* Replay the O (command) and C (control) lines of a .pakscan-style script,
+ * skipping M (image-read) lines. Used as a calibration PRELUDE: the captured
+ * CCD + illumination setup spine that lights the lamp and configures the sensor
+ * before the driven loops take over. Returns commands replayed, -1 on open. */
+static long calib_replay_prelude(pakon_dev *dev, const char *path, unsigned timeout)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) { fprintf(stderr, "cannot open prelude '%s'\n", path); return -1; }
+    char line[1024];
+    uint8_t buf[65536];
+    long n = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == 'O') {
+            int nb = hexbytes(p + 1, buf, sizeof(buf));
+            if (nb < 2) continue;
+            pakon_packet cmd, reply;
+            pakon_packet_build(&cmd, buf[0], buf + 2, buf[1]);
+            pakon_cmd(dev, &cmd, &reply, timeout);
+            n++;
+        } else if (*p == 'C') {
+            unsigned brt, breq, wval, widx, wlen; int consumed = 0;
+            if (sscanf(p + 1, "%x %x %x %x %x%n",
+                       &brt,&breq,&wval,&widx,&wlen,&consumed) != 5) continue;
+            int dn = hexbytes(p + 1 + consumed, buf, sizeof(buf));
+            if (dn < 0) dn = 0;
+            size_t got = 0;
+            pakon_usb_control(dev, (uint8_t)brt, (uint8_t)breq, (uint16_t)wval,
+                              (uint16_t)widx, buf, (uint16_t)wlen, &got, timeout);
+            n++;
+        }
+        /* M (image-read) lines intentionally skipped. */
+    }
+    fclose(fp);
+    return n;
+}
+
+static int do_calibrate(unsigned timeout, size_t nlines, int verbose,
+                        const char *prelude, unsigned exposure)
 {
     pakon_ctx *ctx = NULL;
     if (pakon_usb_init(&ctx) != PAKON_OK) { fprintf(stderr, "init failed\n"); return 1; }
@@ -814,21 +853,33 @@ static int do_calibrate(unsigned timeout, size_t nlines, int verbose)
         pakon_usb_close(dev); pakon_usb_exit(ctx); return 1;
     }
 
-    /* Bring the device to Idle via the captured open handshake. */
-    size_t nseq = sizeof(OPEN_SEQ) / sizeof(OPEN_SEQ[0]);
-    for (size_t i = 0; i < nseq; i++) {
-        const open_step *s = &OPEN_SEQ[i];
-        pakon_packet cmd, reply;
-        pakon_packet_build(&cmd, s->out[0], s->out + 2, s->out[1]);
-        if (pakon_cmd(dev, &cmd, &reply, timeout) != PAKON_OK)
-            fprintf(stderr, "  open step '%s' failed (continuing)\n", s->label);
+    if (prelude) {
+        /* Replay the captured CCD + illumination setup spine (lamp on, sensor
+         * configured) before driving the loops. */
+        long np = calib_replay_prelude(dev, prelude, timeout);
+        if (np < 0) { pakon_usb_release(dev); pakon_usb_close(dev);
+                      pakon_usb_exit(ctx); return 1; }
+        printf("prelude '%s' replayed (%ld commands); running driven calibration...\n",
+               prelude, np);
+    } else {
+        /* No prelude: just the open handshake (dark-offset works, but the gain
+         * phase needs illumination — pass --prelude resources/scan.pakscan). */
+        size_t nseq = sizeof(OPEN_SEQ) / sizeof(OPEN_SEQ[0]);
+        for (size_t i = 0; i < nseq; i++) {
+            const open_step *s = &OPEN_SEQ[i];
+            pakon_packet cmd, reply;
+            pakon_packet_build(&cmd, s->out[0], s->out + 2, s->out[1]);
+            if (pakon_cmd(dev, &cmd, &reply, timeout) != PAKON_OK)
+                fprintf(stderr, "  open step '%s' failed (continuing)\n", s->label);
+        }
+        printf("open handshake done (no prelude); running driven calibration "
+               "(present the open gate, no film)...\n");
     }
-    printf("open handshake done; running driven calibration "
-           "(present the open gate, no film)...\n");
 
     pakon_calib_opts opts = {0};
     opts.nlines = nlines;
     opts.timeout_ms = timeout < 2000 ? 2000 : timeout;
+    opts.exposure = exposure;
     opts.do_dark = 1;
     opts.do_gain = 1;
     opts.verbose = verbose;
@@ -873,6 +924,9 @@ static void usage(const char *argv0)
         "  --calibrate   run the driven CALIBRATE (measure open-gate CCD ->\n"
         "                compute gain/offset); present the open gate, no film\n"
         "  --cal-lines N  CCD lines to average per measurement (default 32)\n"
+        "  --cal-exposure N  nominal CcdExposure for the gain phase (default 256)\n"
+        "  --prelude FILE replay a .pakscan setup spine (CCD+lamp init) before\n"
+        "                calibrating -- needed for the gain phase (illumination)\n"
         "  --cal-verbose  log each calibration iteration\n"
         "  --scan FILE   replay a .pakscan scan script verbatim (fixed length)\n"
         "  --scan-sm FILE  replay setup spine, then drive the image transfer and\n"
@@ -896,6 +950,8 @@ int main(int argc, char **argv)
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
     int want_calibrate = 0, cal_verbose = 0;
     unsigned long cal_lines = 32;
+    unsigned long cal_exposure = 256;
+    const char *cal_prelude = NULL;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -915,6 +971,10 @@ int main(int argc, char **argv)
             want_calibrate = 1;
         } else if (!strcmp(argv[i], "--cal-lines") && i + 1 < argc) {
             cal_lines = strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--prelude") && i + 1 < argc) {
+            cal_prelude = argv[++i];
+        } else if (!strcmp(argv[i], "--cal-exposure") && i + 1 < argc) {
+            cal_exposure = strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(argv[i], "--cal-verbose")) {
             cal_verbose = 1;
         } else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {
@@ -952,7 +1012,8 @@ int main(int argc, char **argv)
     }
 
     if (want_calibrate)
-        return do_calibrate(timeout, (size_t)cal_lines, cal_verbose);
+        return do_calibrate(timeout, (size_t)cal_lines, cal_verbose, cal_prelude,
+                            (unsigned)cal_exposure);
     if (advance_file)
         return do_advance(advance_file, timeout, limit_sec, steps_count);
     if (scan_sm_file)
