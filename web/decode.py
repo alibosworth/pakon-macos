@@ -162,15 +162,18 @@ def export_frames(ribbon_path, base, centres, rotate=90, frame_w=_FRAME_W,
         rendered = (render_jpeg(pos, str(RPD_PROFILE)) if use_rpd
                     else (pos >> 8).astype(np.uint8))
 
+        raw_tiff = WORK_DIR / f"frame_{i + 1:02d}_raw.tif"
         pos_tiff = WORK_DIR / f"frame_{i + 1:02d}.tif"
         jpg_path = WORK_DIR / f"frame_{i + 1:02d}.jpg"
         thumb_path = WORK_DIR / f"thumb_{i + 1:02d}.jpg"
+        # raw negative (uninverted, 16-bit) — for inverting in another tool
+        tifffile.imwrite(str(raw_tiff), part, photometric="rgb")
         tifffile.imwrite(str(pos_tiff), pos, photometric="rgb")
         Image.fromarray(rendered).save(str(jpg_path), "JPEG", quality=92)
         step = max(1, max(rendered.shape[0] // 600, rendered.shape[1] // 600))
         Image.fromarray(rendered[::step, ::step]).save(str(thumb_path),
                                                        "JPEG", quality=85)
-        frames.append({"index": i + 1, "tiff": pos_tiff,
+        frames.append({"index": i + 1, "raw_tiff": raw_tiff, "tiff": pos_tiff,
                        "jpg": jpg_path, "thumb": thumb_path})
 
     emit("Done", 1.0)

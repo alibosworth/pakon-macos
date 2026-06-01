@@ -368,6 +368,7 @@
       <button class="ghost" id="export-jpeg">JPEGs</button>
       <button class="ghost" id="export-contact">Contact sheet</button>
       <button class="ghost" id="export-tiff">TIFFs</button>
+      <button class="ghost" id="export-raw">Raw negatives</button>
       <button class="ghost" id="clear-btn" style="border-color: var(--red); color: var(--red);">Clear</button>
     </div>
   </div>
@@ -765,6 +766,8 @@
         <div class="frame-footer">
           <span class="frame-num">Frame ${index}</span>
           <span>
+            <a href="/api/frames/${index}/raw"  download="frame_${n2}_raw.tif">raw</a>
+            &nbsp;·&nbsp;
             <a href="/api/frames/${index}/tiff" download="frame_${n2}.tif">TIFF</a>
             &nbsp;·&nbsp;
             <a href="/api/frames/${index}/jpeg" download="frame_${n2}.jpg">JPG</a>
@@ -775,6 +778,7 @@
   }
 
   // ── Export zip / contact sheet ─────────────────────────────────────────────
+  $('export-raw').addEventListener('click',     () => window.location = '/api/export?fmt=raw');
   $('export-tiff').addEventListener('click',    () => window.location = '/api/export?fmt=tiff');
   $('export-jpeg').addEventListener('click',    () => window.location = '/api/export?fmt=jpeg');
   $('export-contact').addEventListener('click', () => window.location = '/api/contact');

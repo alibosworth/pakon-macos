@@ -385,6 +385,16 @@ async def api_tiff(n: int):
     return FileResponse(path, media_type="image/tiff", filename=f"frame_{n:02d}.tif")
 
 
+@app.get("/api/frames/{n}/raw")
+async def api_raw(n: int):
+    """Raw negative TIFF (16-bit, uninverted) — for inverting in another tool."""
+    path = _frame_file(n, "raw_tiff")
+    if not path:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="image/tiff",
+                        filename=f"frame_{n:02d}_raw.tif")
+
+
 @app.get("/api/frames/{n}/jpeg")
 async def api_jpeg(n: int):
     """Inverted positive JPEG (8-bit)."""
@@ -398,8 +408,9 @@ async def api_jpeg(n: int):
 
 # fmt -> (state key, file extension, archived name suffix)
 _EXPORT_FMTS = {
-    "tiff": ("tiff", "tif", ""),   # inverted positive TIFF (16-bit, plain)
-    "jpeg": ("jpg",  "jpg", ""),   # rendered positive JPEG (rpd.pf look)
+    "raw":  ("raw_tiff", "tif", "_raw"),  # raw negative TIFF (16-bit, uninverted)
+    "tiff": ("tiff",     "tif", ""),      # inverted positive TIFF (16-bit, plain)
+    "jpeg": ("jpg",      "jpg", ""),      # rendered positive JPEG (rpd.pf look)
 }
 
 
