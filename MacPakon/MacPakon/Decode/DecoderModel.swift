@@ -47,8 +47,8 @@ final class DecoderModel: ObservableObject {
         }
     }
 
-    private static func run(url: URL, nFrames: Int,
-                            progress: @escaping (DecodeStep, Double) -> Void) async throws -> DecoderResult {
+    private static nonisolated func run(url: URL, nFrames: Int,
+                                        progress: @escaping (DecodeStep, Double) -> Void) async throws -> DecoderResult {
         progress(.loading, 0)
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         let raw  = PakonRaw(url: url, data: data)

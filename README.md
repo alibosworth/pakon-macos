@@ -7,9 +7,10 @@ protocol notes and our own USB captures.
 
 > **Status:** Phases 0–5 complete. Full end-to-end scan works on hardware —
 > firmware load, open handshake, film advance, scan drive, and image decode
-> are all validated on Linux and macOS. Phase 6 is a native Swift macOS app
-> (IOKit transport, SwiftUI, no SANE dependency). SANE backend for Linux
-> follows.
+> are all validated on Linux and macOS. Phase 6 is a Python web service
+> (FastAPI + browser UI) that wraps the existing C tools and image pipeline
+> so any machine on the local network can drive the scanner. SANE backend
+> for Linux follows.
 >
 > The decoder handles both the 4-frame and whole-roll scan modes, including
 > Digital ICE IR channel removal, wrap-order de-interleaving, and per-zone
@@ -141,7 +142,11 @@ transfer errors at the very end are normal.
 
 **6. Decode the image**
 
-Requires Python 3, `numpy`, and ImageMagick (`magick`).
+**Option A — web UI (recommended):** start the web service (see below) and
+open `http://localhost:8000` in a browser. Upload the `.raw` file, set the
+frame count, click Process, and download individual TIFFs or a zip of all frames.
+
+**Option B — command line:** requires Python 3, `numpy`, and ImageMagick (`magick`).
 
 ```sh
 # 4-frame strip
@@ -192,6 +197,26 @@ On Linux, pass the env explicitly with `sudo`:
 ```sh
 sudo PAKON_DEBUG=3 ./build/pakon_probe
 ```
+
+## Web service
+
+The web service runs on the machine with the scanner plugged in and exposes a
+browser UI for the full workflow: firmware load, scan, and image processing.
+Any device on the local network can then open it.
+
+```sh
+pip install fastapi uvicorn python-multipart numpy pillow
+uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://<host>:8000`. The UI shows scanner connection state, lets you load
+firmware, trigger a scan with a live progress bar (bytes received), upload or
+reprocess a `.raw` file, set frame count, and download individual frames or a
+zip of all frames as 16-bit TIFFs.
+
+The server calls the compiled `pakon_probe` / `pakon_replay` binaries for
+hardware control and runs the Python image pipeline in a thread pool for processing.
+Build the C tools first (`cmake --build build`).
 
 ## Firmware
 

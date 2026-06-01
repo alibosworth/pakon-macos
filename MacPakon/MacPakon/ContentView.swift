@@ -3,10 +3,12 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var model = ScannerModel()
+    @EnvironmentObject private var router: ProcessingRouter
     @State private var scriptURL: URL? = defaultScriptURL()
     @State private var outputDir: URL = defaultOutputDir()
     @State private var showScriptPicker = false
     @State private var showOutputDirPicker = false
+    @State private var showRawPicker = false
     @State private var showDoneAlert = false
     @State private var doneURL: URL?
     @Environment(\.openWindow) private var openWindow
@@ -22,6 +24,8 @@ struct ContentView: View {
                 actionButton
                 progressRow
             }
+            Divider()
+            openRawRow
         }
         .padding(24)
         .frame(minWidth: 420, minHeight: 260)
@@ -34,7 +38,10 @@ struct ContentView: View {
             }
         }
         .alert("Scan complete", isPresented: $showDoneAlert, presenting: doneURL) { url in
-            Button("Process…") { openWindow(id: "processing") }
+            Button("Process…") {
+                router.pendingURL = url
+                openWindow(id: "processing")
+            }
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             Button("OK", role: .cancel) {}
         } message: { url in
@@ -49,6 +56,14 @@ struct ContentView: View {
                       allowedContentTypes: [.folder],
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first { outputDir = url }
+        }
+        .fileImporter(isPresented: $showRawPicker,
+                      allowedContentTypes: [.data],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                router.pendingURL = url
+                openWindow(id: "processing")
+            }
         }
     }
 
@@ -78,6 +93,15 @@ struct ContentView: View {
         case .warm:         return "Scanner connected"
         case .cold:         return "Scanner detected — needs firmware"
         case .disconnected: return "No scanner detected"
+        }
+    }
+
+    // ---- Open raw file ----
+
+    private var openRawRow: some View {
+        HStack {
+            Button("Open raw file…") { showRawPicker = true }
+            Spacer()
         }
     }
 
@@ -194,7 +218,7 @@ struct ContentView: View {
 // ---- Defaults ----
 
 private func defaultScriptURL() -> URL? {
-    Bundle.main.url(forResource: "36frames", withExtension: "pakscan")
+    Bundle.main.url(forResource: "scan", withExtension: "pakscan")
 }
 
 private func defaultOutputDir() -> URL {

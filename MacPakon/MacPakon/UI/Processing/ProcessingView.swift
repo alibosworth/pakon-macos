@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ProcessingView: View {
+    @EnvironmentObject private var router: ProcessingRouter
     @StateObject private var model = DecoderModel()
     @State private var showFilePicker = false
     @State private var showExportPicker = false
@@ -42,19 +43,35 @@ struct ProcessingView: View {
                 CropEditorView(frame: frame, model: model)
             }
         }
+        .onChange(of: router.pendingURL) { _, newURL in
+            if newURL != nil { model.state = .idle }
+        }
     }
 
     // ---- Idle ----
 
     private var idleView: some View {
         VStack(spacing: 20) {
-            Text("Open a .raw scan file to preview and export frames.")
-                .foregroundStyle(.secondary)
-            HStack {
+            if let url = router.pendingURL {
+                Text(url.lastPathComponent)
+                    .font(.headline)
+            } else {
+                Text("Open a .raw scan file to preview and export frames.")
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 16) {
                 Stepper("Frames: \(frameCount)", value: $frameCount, in: 1...72)
                     .frame(width: 160)
-                Button("Open raw file…") { showFilePicker = true }
+                if let url = router.pendingURL {
+                    Button("Process") {
+                        model.decode(url: url, nFrames: frameCount)
+                        router.pendingURL = nil
+                    }
                     .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Open raw file…") { showFilePicker = true }
+                        .buttonStyle(.borderedProminent)
+                }
             }
         }
         .padding(40)

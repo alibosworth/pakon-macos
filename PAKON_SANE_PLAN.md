@@ -208,37 +208,48 @@ a real strip of film, on at least one OS. This is the make-or-break milestone.
 
 ---
 
-## Phase 6 — Native macOS app (Swift) ← CURRENT PRIORITY
+## Phase 6 — Python web service
 
-**Goal:** A self-contained macOS `.app` that photographers can download and run — no
-terminal, no Homebrew, no SANE. This is the real gap: Windows users have TLX running on
-Windows 11; macOS has nothing.
+**Goal:** A web service running on the machine with the scanner plugged in, accessible
+from any browser on the local network — no native app, no Homebrew, no Xcode. This
+replaces the abandoned Swift macOS app. The existing C tools (`pakon_probe`,
+`pakon_replay`) and Python image pipeline (`pakon_image.py`) do all the heavy lifting;
+the web layer is a thin wrapper.
 
-**USB transport:** Use macOS-native IOKit (`IOUSBLib`) instead of libusb. IOKit works from
-a notarized app without a kernel extension or sandbox exception; the scanner has no system
-driver claiming it. This removes the libusb dependency for the Mac app entirely.
-
-**Architecture:** libpakon (the C transport/protocol core) stays as-is. The Swift app
-links against a thin IOKit-backed transport layer (replacing or wrapping `pakon_usb.c` for
-macOS) and calls into the existing protocol and command logic via a bridging header.
+**Architecture:** FastAPI server (`web/`) calling out to the compiled binaries via
+subprocess for hardware control and running the image pipeline in a thread pool.
+A minimal HTML/JS frontend (no build step, single `index.html`) talks to a REST + SSE API.
 
 Tasks:
-1. IOKit transport layer: device enumeration (`IOUSBDevice`), firmware load, bulk I/O
-   (`IOUSBPipe`). Mirror the `pakon_usb` API so the rest of the stack is unchanged.
-2. SwiftUI app shell: device detection (connect/disconnect notifications), status display,
-   scan button, progress bar, output folder picker.
-3. Firmware load flow: detect cold `0F05:F235`, load `.pakfw`, wait for warm `0F05:F135`.
-   Bundle `f135.pakfw` in the app resources.
-4. Scan flow: open handshake → scan (drive `scan_fullroll.pakscan` sequence) → stream
-   `0x86` to a temp file. Progress = bytes received / expected total.
-5. Image decode in Swift: port `pakon_image.py` logic to Swift/Accelerate — deinterleave
-   B,R,G, co-register trilinear lines, autocrop, write 16-bit RGB TIFF via ImageIO.
-6. Frame splitting: auto-detect frame boundaries from the ribbon and export individual
-   frames (replaces `--frames N`).
-7. Distribution: sign + notarize outside the App Store; document the process.
+1. `web/app.py` — FastAPI application with the following endpoints:
+   - `GET /api/status` — poll scanner state (`disconnected` / `cold` / `warm`) via
+     subprocess to `pakon_probe --list` or `pyusb` VID/PID check.
+   - `POST /api/firmware` — run `pakon_probe --load-firmware resources/f135.pakfw`;
+     stream stdout progress via Server-Sent Events.
+   - `POST /api/scan` — run `pakon_replay --scan resources/36frames.pakscan --image
+     <tmpfile>`; stream bytes-written (file size poll) as SSE progress events.
+   - `POST /api/process` — accept a `.raw` path or multipart upload plus `frames`,
+     `rotate`, `resample` params; run decode in a `ProcessPoolExecutor`; stream step
+     progress via SSE.
+   - `GET /api/frames/{n}` — return the n-th decoded frame as a TIFF download.
+   - `GET /api/export` — return all decoded frames as a zip.
+2. `web/static/index.html` — single-page UI:
+   - Status badge (colour-coded disconnected / cold / warm), auto-polls `/api/status`.
+   - Firmware load button (visible when cold), progress bar.
+   - Scan button (visible when warm), live bytes-received progress bar.
+   - Frame count stepper (1–72) and "Process" button; accepts a dropped or uploaded
+     `.raw` file as an alternative to a just-completed scan.
+   - Scrollable thumbnail grid; click to download individual TIFF.
+   - "Export all" button to download zip.
+3. `web/image.py` — thin wrapper importing `tools/pakon_image.py` decode logic;
+   exposes a single `decode(path, frames, rotate, resample, progress_cb)` function
+   so the FastAPI worker can call it without subprocess overhead.
+4. `web/README.md` — setup and launch instructions (pip install, how to point it at
+   the built C tools, running behind a LAN reverse-proxy if desired).
 
-**Exit criteria:** A notarized `.app` that a Mac user can drag to Applications, plug in the
-scanner, click Scan, and get TIFFs — on macOS 13+.
+**Exit criteria:** `uvicorn web.app:app` running on the Linux box; open the URL on a
+separate laptop; plug in scanner, load firmware, run a scan, and download TIFFs —
+without touching a terminal on the scanning machine after startup.
 
 ---
 
@@ -293,9 +304,9 @@ Tasks:
   trailing byte is a command param. Confirmed from the full 2218-command capture set.
 - **Single-tester hardware**: only the F-135 has been validated; F-235/F-335/Plus remain
   theoretical. Mark clearly in the support matrix.
-- **IOKit bulk transfer reliability**: IOKit `IOUSBPipe` bulk I/O has its own quirks
-  (packet sizing, timeouts, stall clearing). Validate early against the real scanner
-  before building the full app on top of it.
+- **subprocess latency for status polling**: calling `pakon_probe --list` on every
+  `/api/status` poll adds ~100 ms per call. If too slow, switch to a `pyusb` VID/PID
+  check in-process, or keep a background thread that polls and caches the state.
 - **Dual-tap CCD colour seam (full-roll scan mode)**: The whole-roll scan mode uses
   a wider CCD readout that includes a Digital ICE IR channel (~658 px, neutral
   grayscale, constant down the roll). The IR band sits mid-line and the two visible
@@ -310,6 +321,6 @@ Tasks:
 - ~~Phase 3: open-handshake replay trace.~~ Done.
 - ~~Phase 4: Windows scan captures.~~ Done.
 - ~~Phase 5: scan replay + image decode.~~ Done (Linux + macOS).
-- **Phase 6**: run the Swift app end-to-end on macOS — plug in scanner, click Scan, get TIFFs.
+- **Phase 6**: start the web service on the Linux box; open it in a browser; plug in scanner, load firmware, scan, get TIFFs.
 - **Phase 7**: run `scanimage -d pakon` end-to-end on Linux.
 - Throughout: a physical scanner and both a Linux and a macOS machine.

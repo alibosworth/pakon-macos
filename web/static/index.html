@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pakon F-135</title>
+  <style>
+    :root {
+      --bg: #161616;
+      --surface: #212121;
+      --surface2: #2a2a2a;
+      --border: #333;
+      --text: #e2e2e2;
+      --muted: #888;
+      --accent: #5b9cf6;
+      --green: #52c97a;
+      --orange: #f5a623;
+      --red: #f25a5a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 28px 24px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      margin-bottom: 28px;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.01em; }
+    .badge {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.warm   { background: var(--green); }
+    .dot.cold   { background: var(--orange); }
+    .badge.warm { color: var(--text); }
+    .badge.cold { color: var(--orange); }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 22px;
+      margin-bottom: 14px;
+    }
+    .card h2 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 15px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:hover:not(:disabled) { opacity: 0.85; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    button.ghost:hover:not(:disabled) { border-color: var(--accent); opacity: 1; }
+
+    label.field {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 0.85rem; color: var(--muted);
+    }
+    input[type="number"], input[type="text"], select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text);
+      padding: 6px 8px;
+      font-size: 0.88rem;
+    }
+    input[type="number"] { width: 68px; }
+    input[type="text"]   { width: 130px; }
+    select               { padding-right: 6px; }
+    input[type="file"]   { display: none; }
+    .upload-label {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 13px;
+      font-size: 0.88rem;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .upload-label:hover { border-color: var(--accent); color: var(--text); }
+
+    .progress-wrap { margin-top: 14px; display: none; }
+    .progress-wrap.show { display: block; }
+    progress {
+      display: block; width: 100%; height: 5px;
+      border: none; border-radius: 3px;
+      background: var(--bg);
+      appearance: none;
+    }
+    progress::-webkit-progress-bar   { background: var(--bg); border-radius: 3px; }
+    progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; transition: width 0.25s; }
+    progress::-moz-progress-bar      { background: var(--accent); border-radius: 3px; }
+    .progress-label { font-size: 0.78rem; color: var(--muted); margin-top: 5px; }
+
+    .msg { font-size: 0.83rem; color: var(--muted); }
+    .msg.ok  { color: var(--green); }
+    .msg.err { color: var(--red); }
+
+    .file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .file-name {
+      font-size: 0.83rem; font-family: monospace;
+      color: var(--muted); max-width: 280px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .file-name.set { color: var(--text); }
+
+    .log-box {
+      margin-top: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 8px 10px;
+      font-size: 0.76rem; font-family: monospace;
+      color: var(--muted);
+      max-height: 90px; overflow-y: auto;
+      display: none;
+    }
+    .log-box.show { display: block; }
+
+    #frames-section { margin-top: 4px; }
+    .frames-header {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .frames-header h2 { margin-bottom: 0; }
+    .frames-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 10px;
+    }
+    .frame-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      overflow: hidden;
+    }
+    .frame-card img {
+      width: 100%; height: 130px;
+      object-fit: cover; display: block;
+      background: #111;
+    }
+    .frame-footer {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+    }
+    .frame-num { font-size: 0.78rem; color: var(--muted); }
+    .frame-footer a {
+      font-size: 0.78rem; color: var(--accent); text-decoration: none;
+    }
+    .frame-footer a:hover { text-decoration: underline; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Pakon F-135</h1>
+  <div class="badge" id="badge">
+    <div class="dot" id="dot"></div>
+    <span id="badge-text">Checking…</span>
+  </div>
+</header>
+
+<!-- Firmware (cold only) -->
+<div class="card hidden" id="fw-card">
+  <h2>Firmware</h2>
+  <div class="row">
+    <button id="fw-btn">Load firmware</button>
+    <span class="msg" id="fw-msg"></span>
+  </div>
+  <div class="progress-wrap" id="fw-prog-wrap">
+    <progress id="fw-prog"></progress>
+    <div class="progress-label" id="fw-prog-label"></div>
+  </div>
+  <div class="log-box" id="fw-log"></div>
+</div>
+
+<!-- Scan (warm only) -->
+<div class="card hidden" id="scan-card">
+  <h2>Scan</h2>
+  <div class="row">
+    <button id="scan-btn">Scan</button>
+    <span class="msg" id="scan-msg"></span>
+  </div>
+  <div class="progress-wrap" id="scan-prog-wrap">
+    <progress id="scan-prog" max="1300"></progress>
+    <div class="progress-label" id="scan-prog-label"></div>
+  </div>
+</div>
+
+<!-- Process (always) -->
+<div class="card" id="proc-card">
+  <h2>Process</h2>
+  <div class="file-row">
+    <span class="file-name" id="raw-name">No file — run a scan or upload a .raw file</span>
+    <label class="upload-label">
+      <input type="file" id="raw-upload" accept=".raw">
+      Upload .raw…
+    </label>
+  </div>
+  <div class="row" style="margin-top: 14px;">
+    <label class="field">
+      Frames
+      <input type="number" id="frames" value="36" min="1" max="72">
+    </label>
+    <label class="field">
+      Rotate
+      <select id="rotate">
+        <option value="0">0°</option>
+        <option value="90" selected>90°</option>
+        <option value="180">180°</option>
+        <option value="270">270°</option>
+      </select>
+    </label>
+    <label class="field">
+      Resample
+      <input type="text" id="resample" placeholder="e.g. 3000x2000">
+    </label>
+    <button id="proc-btn" disabled>Process</button>
+  </div>
+  <div class="progress-wrap" id="proc-prog-wrap">
+    <progress id="proc-prog" value="0" max="1"></progress>
+    <div class="progress-label" id="proc-prog-label"></div>
+  </div>
+  <div class="msg" id="proc-msg" style="margin-top: 8px;"></div>
+</div>
+
+<!-- Frames -->
+<div class="card hidden" id="frames-section">
+  <div class="frames-header">
+    <h2 id="frames-title">Frames</h2>
+    <button class="ghost" id="export-btn">Export all (.zip)</button>
+  </div>
+  <div class="frames-grid" id="frames-grid"></div>
+</div>
+
+<script>
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+
+  function setMsg(el, text, kind) {
+    el.textContent = text;
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  // Consume a POST SSE stream.  bodyData may be FormData or a plain object.
+  async function postSSE(url, bodyData, onEvent) {
+    const isForm = bodyData instanceof FormData;
+    const resp = await fetch(url, {
+      method: 'POST',
+      ...(isForm
+        ? { body: bodyData }
+        : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyData) }),
+    });
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (line.startsWith('data: ')) {
+          try { onEvent(JSON.parse(line.slice(6))); } catch {}
+        }
+      }
+    }
+  }
+
+  // ── Status polling ───────────────────────────────────────────────────────
+  let hasScanFile = false;
+  let uploadFile = null;
+
+  async function pollStatus() {
+    try {
+      const d = await fetch('/api/status').then(r => r.json());
+
+      // Badge
+      const labels = {
+        warm: 'Scanner ready',
+        cold: 'Scanner detected — needs firmware',
+        disconnected: 'No scanner detected',
+        unknown: 'Scanner status unknown',
+      };
+      $('badge').className = 'badge ' + d.state;
+      $('dot').className   = 'dot '   + d.state;
+      $('badge-text').textContent = labels[d.state] || d.state;
+
+      $('fw-card').classList.toggle('hidden', d.state !== 'cold');
+      $('scan-card').classList.toggle('hidden', d.state !== 'warm');
+
+      // If a scan file exists server-side and we haven't surfaced it yet
+      if (d.scan_file && !hasScanFile && !uploadFile) {
+        hasScanFile = true;
+        $('raw-name').textContent = d.scan_file;
+        $('raw-name').classList.add('set');
+        $('proc-btn').disabled = false;
+      }
+    } catch {}
+  }
+
+  setInterval(pollStatus, 2000);
+  pollStatus();
+
+  // ── Firmware load ────────────────────────────────────────────────────────
+  $('fw-btn').addEventListener('click', async () => {
+    const btn = $('fw-btn');
+    btn.disabled = true;
+    setMsg($('fw-msg'), '');
+    $('fw-prog-wrap').classList.add('show');
+    $('fw-prog').removeAttribute('value');   // indeterminate
+    $('fw-log').textContent = '';
+    $('fw-log').classList.add('show');
+
+    const lines = [];
+    await postSSE('/api/firmware', {}, ev => {
+      if (ev.type === 'log') {
+        lines.push(ev.message);
+        const el = $('fw-log');
+        el.textContent = lines.join('\n');
+        el.scrollTop = el.scrollHeight;
+      } else if (ev.type === 'done') {
+        $('fw-prog').value = 1; $('fw-prog').max = 1;
+        setMsg($('fw-msg'), 'Firmware loaded — scanner re-enumerating', 'ok');
+      } else if (ev.type === 'error') {
+        setMsg($('fw-msg'), ev.message, 'err');
+      }
+    });
+
+    btn.disabled = false;
+  });
+
+  // ── Scan ─────────────────────────────────────────────────────────────────
+  $('scan-btn').addEventListener('click', async () => {
+    const btn = $('scan-btn');
+    btn.disabled = true;
+    setMsg($('scan-msg'), 'Starting…');
+    $('scan-prog-wrap').classList.add('show');
+    $('scan-prog').value = 0;
+    hasScanFile = false;
+
+    await postSSE('/api/scan', {}, ev => {
+      if (ev.type === 'progress') {
+        $('scan-prog').value = ev.mb;
+        $('scan-prog-label').textContent = `${ev.mb} MB received`;
+        $('scan-msg').textContent = '';
+      } else if (ev.type === 'done') {
+        $('scan-prog').value = $('scan-prog').max;
+        $('scan-prog-label').textContent = `Complete — ${ev.mb} MB`;
+        setMsg($('scan-msg'), `Scan complete (${ev.mb} MB)`, 'ok');
+        hasScanFile = true;
+        $('raw-name').textContent = 'scan.raw';
+        $('raw-name').classList.add('set');
+        $('proc-btn').disabled = false;
+      } else if (ev.type === 'error') {
+        setMsg($('scan-msg'), ev.message, 'err');
+      }
+    });
+
+    btn.disabled = false;
+  });
+
+  // ── File upload ──────────────────────────────────────────────────────────
+  $('raw-upload').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    uploadFile = f;
+    $('raw-name').textContent = f.name;
+    $('raw-name').classList.add('set');
+    $('proc-btn').disabled = false;
+  });
+
+  // ── Process ──────────────────────────────────────────────────────────────
+  $('proc-btn').addEventListener('click', async () => {
+    const btn = $('proc-btn');
+    btn.disabled = true;
+    setMsg($('proc-msg'), '');
+    $('proc-prog-wrap').classList.add('show');
+    $('proc-prog').value = 0;
+    $('frames-section').classList.add('hidden');
+    $('frames-grid').innerHTML = '';
+
+    const fd = new FormData();
+    fd.append('frames',  $('frames').value);
+    fd.append('rotate',  $('rotate').value);
+    const rs = $('resample').value.trim();
+    if (rs) fd.append('resample', rs);
+    if (uploadFile) fd.append('file', uploadFile);
+
+    await postSSE('/api/process', fd, ev => {
+      if (ev.type === 'progress') {
+        $('proc-prog').value = ev.pct;
+        $('proc-prog-label').textContent = ev.step;
+      } else if (ev.type === 'done') {
+        $('proc-prog').value = 1;
+        $('proc-prog-label').textContent = 'Done';
+        setMsg($('proc-msg'), `${ev.count} frame${ev.count !== 1 ? 's' : ''} processed`, 'ok');
+        loadFrames();
+      } else if (ev.type === 'error') {
+        setMsg($('proc-msg'), ev.message, 'err');
+      }
+    });
+
+    btn.disabled = false;
+  });
+
+  // ── Frames grid ──────────────────────────────────────────────────────────
+  async function loadFrames() {
+    const frames = await fetch('/api/frames').then(r => r.json());
+    if (!frames.length) return;
+
+    $('frames-section').classList.remove('hidden');
+    $('frames-title').textContent = `Frames (${frames.length})`;
+    const grid = $('frames-grid');
+    grid.innerHTML = '';
+
+    for (const { index } of frames) {
+      const n2 = String(index).padStart(2, '0');
+      const card = document.createElement('div');
+      card.className = 'frame-card';
+      card.innerHTML = `
+        <img src="/api/frames/${index}/thumb?t=${Date.now()}"
+             alt="Frame ${index}" loading="lazy">
+        <div class="frame-footer">
+          <span class="frame-num">Frame ${index}</span>
+          <a href="/api/frames/${index}/tiff"
+             download="frame_${n2}.tif">Download TIFF</a>
+        </div>`;
+      grid.appendChild(card);
+    }
+  }
+
+  // ── Export zip ───────────────────────────────────────────────────────────
+  $('export-btn').addEventListener('click', () => {
+    window.location = '/api/export';
+  });
+</script>
+</body>
+</html>
