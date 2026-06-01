@@ -27,7 +27,6 @@ if str(_TOOLS) not in sys.path:
 
 from pakon_image import (  # noqa: E402
     autocrop,
-    detect_zone_perm,
     find_frame_grid,
     find_ir_band,
     invert_c41,
@@ -36,6 +35,8 @@ from pakon_image import (  # noqa: E402
     register_zones,
     render_jpeg,
     _c41_lut,
+    _FIXED_ZONE0_PERM,
+    _FIXED_ZONE1_PERM,
 )
 
 WORK_DIR = Path("/tmp/pakon_web")
@@ -101,9 +102,14 @@ def decode_raw(
     else:
         zones = [(0, width)]
 
-    # Auto-detect each zone's R/G/B identity from the orange film base (robust;
-    # fixes the purple cast that a hardcoded order causes on the wrong zone).
-    zone_perms = [detect_zone_perm(chans, c0, c1)[0] for (c0, c1) in zones]
+    # Per-zone R/G/B identity: the verified FIXED order (a hardware/replay-phase
+    # constant, confirmed on multiple rolls). Orange-base auto-detection was tried
+    # but is unreliable on dark/red-dominant rolls (the bright percentile catches
+    # scene highlights, not clean film base, and flips G/B → purple cast).
+    if len(zones) == 2:
+        zone_perms = [_FIXED_ZONE0_PERM, _FIXED_ZONE1_PERM]
+    else:
+        zone_perms = [_FIXED_ZONE0_PERM]
 
     # ── Trilinear registration ────────────────────────────────────────────────
     emit("Measuring registration leads", 0.15)

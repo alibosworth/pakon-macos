@@ -89,6 +89,19 @@ def _srgb_encode(x01):
 
 _G_OF_POS = {0: "b", 1: "r", 2: "g"}  # global chans label of each interleave pos
 
+# Verified fixed per-zone channel identity (the standard 36-frame replay phase).
+# The R/G/B interleave positions are a fixed property of the CCD tap + replay
+# buffer phase — NOT per-scan — so this is hardcoded and is the default. Verified
+# against the OEM reference scans of two different rolls:
+#   zone0 (after-IR):  R=pos0, G=pos1, B=pos2
+#   zone1 (before-IR): R=pos1, G=pos2, B=pos0  (= identity vs the global chans)
+# Expressed as perms mapping output r/g/b -> the global `chans` key (b=pos0,
+# r=pos1, g=pos2). NOTE: orange-base auto-detection (detect_zone_perm) is
+# unreliable on dark/red-dominant rolls — the bright percentile catches scene
+# highlights, not clean film base, and flips G/B — so it is opt-in, not default.
+_FIXED_ZONE0_PERM = {"r": "b", "g": "r", "b": "g"}
+_FIXED_ZONE1_PERM = None  # identity
+
 
 def _zone_band_bases(chans, c0, c1, sat, pct, nwin, winrows):
     """Per-window per-position film-base percentiles for a zone. Measured on
@@ -519,10 +532,12 @@ def main():
                     help="samples per scan line (default 8000)")
     ap.add_argument("--order", default="rgb",
                     help="channel order of the interleave (default rgb)")
-    ap.add_argument("--channel-order", default="auto", choices=["auto", "brg"],
-                    help="per-zone R/G/B identity: 'auto' detects it from the "
-                         "orange film base (default, robust); 'brg' forces the "
-                         "old hardcoded order")
+    ap.add_argument("--channel-order", default="fixed",
+                    choices=["fixed", "auto", "brg"],
+                    help="per-zone R/G/B identity: 'fixed' (default) = the "
+                         "verified constant order; 'auto' = detect from the "
+                         "orange film base (unreliable on dark/red rolls); "
+                         "'brg' = old legacy order")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     ap.add_argument("--frames", type=int, default=None,
                     help="split into N frames (default: auto-detect from valley count)")
@@ -631,10 +646,10 @@ def main():
         zones = [(0, width)]
 
     # Channel identity per zone. The CCD output taps emit R/G/B in a
-    # zone-specific order, so a single global order produces a colour cast (e.g.
-    # purple) on the mis-ordered zone. Default 'auto' detects each zone's order
-    # from the orange film base (detect_zone_perm); 'brg' forces the old
-    # hardcoded order (pos0=B,pos1=R,pos2=G + a fixed zone1 perm).
+    # zone-specific order, so the wrong order produces a colour cast (purple).
+    # The order is a FIXED hardware/replay-phase constant (verified on multiple
+    # rolls), so 'fixed' (default) hardcodes it. 'auto' = orange-base detection
+    # (unreliable on dark/red rolls — opt-in only). 'brg' = old legacy order.
     if args.channel_order == "auto":
         zone_perms = []
         for c0, c1 in zones:
@@ -644,9 +659,12 @@ def main():
                   f"{[int(base[p]) for p in (0, 1, 2)]} -> "
                   f"R=pos{ranked[0]} G=pos{ranked[1]} B=pos{ranked[2]}")
             zone_perms.append(perm)
-    else:
+    elif args.channel_order == "brg":
         zone_perms = [None, {"r": "g", "g": "b", "b": "r"}][:len(zones)] \
             if len(zones) == 2 else [None]
+    else:  # "fixed" (default) — verified per-zone order
+        zone_perms = ([_FIXED_ZONE0_PERM, _FIXED_ZONE1_PERM] if len(zones) == 2
+                      else [_FIXED_ZONE0_PERM])
 
     if args.register:
         if args.reg_leads:
