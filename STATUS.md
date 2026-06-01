@@ -163,9 +163,28 @@ algorithm, (3) driven C backend.
     fires ~4× (trigger TBD, skippable for open-gate / handled by replay-to-takeover);
     teardown (`92` readout-stop + `a2` motor-stop + PICL resets) is MANDATORY —
     killing the host does NOT stop the motor.
+- **END-TO-END VALIDATED WITH REAL FILM (2026-06-01).** Drove a real 4-frame C-41
+  negative through the **driven** `--scan-sm` path on hardware: firmware load → open
+  → driven scan-out (poll+read, no re-arm) → teardown (engines reset to idle). Film
+  was detected (`film detected at 28446720 bytes`); decoded with `pakon_image.py`
+  (venv: numpy+pillow+tifffile) into 4 recognizable photos (a wedding/event series).
+  The capture itself was clean; three POST-CAPTURE rough edges to polish:
+  1. **End-of-roll didn't auto-stop** — `sm_chunk_is_white` keys on brightness
+     (>40000), but a NEGATIVE transmits bright (orange mask/clear base), so the
+     trailing-white stop never armed and it ran to the 400MB cap. Fix: detect
+     end-of-roll by loss of detail/variance (blank open gate = low spatial
+     variance), not absolute brightness.
+  2. **Uneven frame splitting** — gap detector mis-placed boundaries (frames came
+     out 2660/1232/3124/1880 rows) on 419MB with lots of blank margin.
+  3. Magenta cast = naive linear invert (the separate C-41 orange-mask / "the look"
+     work, docs/IMAGING.md).
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 — essentially COMPLETE; polish remaining.** The capture-free driven
+**Milestone 3 — COMPLETE (capture-free driven backend validated with real film).**
+Polish items, in priority order:
+- **End-of-roll for negatives**: replace brightness-based `sm_chunk_is_white` with a
+  variance/detail-based "no-film" detector so driven scans of negatives auto-stop.
+- **Frame-split robustness** on long/blank-padded scans. The capture-free driven
 backend now works end to end on hardware: OPEN → param-read+drift-check → CONFIGURE
 (synthesized) → dark-offset calibrate (validated) → DRIVEN scan-out (validated) →
 teardown. What's still *replayed* (acceptable — fixed boilerplate, not calibration):
