@@ -180,6 +180,23 @@ algorithm, (3) driven C backend.
      work, docs/IMAGING.md).
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
+- **ROOT CAUSE of driven-scan incompleteness CONFIRMED (2026-06-01).** A real-film
+  driven `--scan-sm` scanned only ~3/4 of the strip then went DARK (flat ~317) for
+  the rest — the illumination/readout DIED mid-scan, and the last quarter scanned
+  black (operator confirmed: not end-of-roll, film left in transport). Brightness
+  profiles settle it: **verbatim `--scan` stays lit the whole strip** (mean 15-57k,
+  80-100% signal across all 20 windows — it replays every housekeeping write);
+  **driven `--scan-sm` dies at ~38%** because the "no re-arm" loop sends NO mid-scan
+  writes after takeover. The OEM sends periodic per-frame housekeeping (capture:
+  reads 546/1035/5569/9302, irregular = frame-triggered) that keeps the readout
+  alive; dropping it kills the scan ~3/4 through. ⇒ End-of-roll detection (bright OR
+  dark) is moot — the scan dies before the true end regardless. The fix is the
+  housekeeping CADENCE (the long-standing unsolved piece), best from a clean
+  `--scan --trace-status` capture correlating the housekeeping writes to poll-status
+  at frame boundaries, then replaying them on that trigger. NOT a live-guess task.
+  WORKING capture path meanwhile: **verbatim `--scan`** (full strip, fixed length;
+  matches a 4-frame neg) + `advance` to eject.
+
 - **REGRESSION + REVERT (2026-06-01).** The synthesized 4-command teardown
   (`sm_teardown`) was a MISTAKE and is reverted. It assumed `02 04 20 01 80 00` =
   "lamp off" (unconfirmed) and replaced the known-good captured 761-command teardown
