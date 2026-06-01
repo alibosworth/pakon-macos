@@ -139,16 +139,26 @@ static pakon_result calib_write_reg(pakon_dev *dev, uint8_t bank, uint8_t reg,
     return pakon_cmd(dev, &pkt, &reply, timeout_ms);
 }
 
+static void calib_measure(const uint8_t *buf, size_t len,
+                          size_t col0, size_t col1,
+                          unsigned mean[3], unsigned peak[3]);
+
+/* Kick the readout engine once (host arm + PICL 0x8a). */
+static void calib_kick(pakon_dev *dev, unsigned timeout_ms)
+{
+    pakon_packet reply;
+    pakon_cmd_raw(dev, CALIB_HOST_ARM[0], CALIB_HOST_ARM + 2,
+                  CALIB_HOST_ARM[1], &reply, timeout_ms);
+    pakon_cmd_raw(dev, CALIB_PICL_ARM[0], CALIB_PICL_ARM + 2,
+                  CALIB_PICL_ARM[1], &reply, timeout_ms);
+}
+
 /*
  * Acquire `nlines` worth of open-gate CCD samples into `buf` (capacity
- * `buf_cap` bytes). Kicks the readout (host arm + PICL 0x8a) then reads 0x86
- * until enough bytes arrive or a read window comes back empty. Returns the byte
- * count gathered.
- *
- * NEEDS-HARDWARE: this is the calibration (no-motor) acquisition seam. The kicks
- * are the ones the preview/calibration phase uses in the capture; whether a
- * single arm yields one readable line or the readout needs repeated arming is
- * to be confirmed on the Linux box. Structured so only this function changes.
+ * `buf_cap` bytes). The readout needs a kick to produce each burst (confirmed on
+ * hardware: kicking once and reading continuously starves the cold stream), so
+ * we kick before each read and accumulate until `want` bytes arrive or the
+ * stream stays empty for a few tries. Returns the byte count.
  */
 static size_t calib_acquire(pakon_dev *dev, size_t nlines,
                             uint8_t *buf, size_t buf_cap, unsigned timeout_ms)
@@ -156,24 +166,45 @@ static size_t calib_acquire(pakon_dev *dev, size_t nlines,
     size_t want = nlines * CALIB_LINE_BYTES;
     if (want > buf_cap) want = buf_cap;
     size_t total = 0;
-    pakon_packet reply;
+    unsigned empties = 0;
 
-    for (unsigned tries = 0; tries < nlines + 4 && total < want; tries++) {
-        /* arm the readout */
-        pakon_cmd_raw(dev, CALIB_HOST_ARM[0], CALIB_HOST_ARM + 2,
-                      CALIB_HOST_ARM[1], &reply, timeout_ms);
-        pakon_cmd_raw(dev, CALIB_PICL_ARM[0], CALIB_PICL_ARM + 2,
-                      CALIB_PICL_ARM[1], &reply, timeout_ms);
-
+    while (total < want) {
+        calib_kick(dev, timeout_ms);
         size_t got = 0;
         pakon_result r = pakon_usb_recv(dev, PAKON_EP_IMAGE_IN,
                                         buf + total, want - total, &got,
                                         timeout_ms);
-        total += got;
-        if (got == 0 || (r != PAKON_OK && r != PAKON_ERR_TIMEOUT))
-            break;
+        if (got) { total += got; empties = 0; }
+        else if (++empties > 4) break;     /* stream not producing -> give up */
+        if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) break;
     }
     return total;
+}
+
+/*
+ * Warm up the illumination: the lamp ramps from dark to open-gate white over the
+ * first few hundred streamed lines (measured: mean 3840 -> ~54000). Stream and
+ * discard until the measured level crosses `bright` or we hit `max_rounds`.
+ * Returns the final measured peak (max channel). `buf`/`buf_cap` is scratch.
+ */
+static unsigned calib_warmup(pakon_dev *dev, size_t nlines,
+                             uint8_t *buf, size_t buf_cap,
+                             size_t col0, size_t col1, unsigned bright,
+                             unsigned max_rounds, unsigned timeout_ms, int verbose)
+{
+    unsigned mean[3], peak[3], best = 0;
+    for (unsigned w = 0; w < max_rounds; w++) {
+        size_t got = calib_acquire(dev, nlines, buf, buf_cap, timeout_ms);
+        calib_measure(buf, got, col0, col1, mean, peak);
+        unsigned mx = peak[0] > peak[1] ? peak[0] : peak[1];
+        if (peak[2] > mx) mx = peak[2];
+        best = mx;
+        if (verbose)
+            pakon_logf(PAKON_LOG_INFO, "calib warmup w=%u peak=%u/%u/%u (%zuB)",
+                       w, peak[0], peak[1], peak[2], got);
+        if (mx >= bright) break;
+    }
+    return best;
 }
 
 /* Measure per-channel mean+peak over the column window from `buf`. */
@@ -280,6 +311,19 @@ pakon_result pakon_calib_run(pakon_dev *dev, const pakon_calib_opts *opts,
         for (int k = 0; k < 3; k++)
             calib_write_reg(dev, PAKON_BANK_TIMING, exp_reg[k],
                             pakon_calib_enc_exposure((int)o.exposure), o.timeout_ms);
+        /* Set the control bitmask (bank 0x82 reg 0) with the integration-strobe
+         * bit 0x100, as the OEM does during its open-gate preview (reg0=0x0161). */
+        calib_write_reg(dev, PAKON_BANK_TIMING, 0 /*control*/, 0x0161, o.timeout_ms);
+
+        /* Warm the lamp: stream until the open-gate level comes up (the lamp
+         * ramps dark->white over the first few hundred lines). */
+        unsigned warm = calib_warmup(dev, nlines, buf, sizeof(buf), o.col0, o.col1,
+                                     PAKON_CALIB_WARMUP_BRIGHT, PAKON_CALIB_WARMUP_MAX,
+                                     o.timeout_ms, o.verbose);
+        if (o.verbose)
+            pakon_logf(PAKON_LOG_INFO, "calib gain: lamp warmed to peak=%u "
+                       "(target>=%u)", warm, PAKON_CALIB_WARMUP_BRIGHT);
+
         for (unsigned it = 0; it < PAKON_CALIB_GAIN_ITERS; it++) {
             for (int k = 0; k < 3; k++)
                 calib_write_reg(dev, PAKON_BANK_AFE, bank_gain_reg[k],
