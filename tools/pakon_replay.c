@@ -268,24 +268,26 @@ static int hexbytes(const char *s, uint8_t *out, size_t max)
  * (orange C-41 base) -- is far darker, so a chunk that is almost all "white"
  * means no film. Latch film_seen on the first non-white chunk, then stop after
  * a sustained run of trailing white. See docs/PROTOCOL.md photometry. */
-#define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white" */
-#define SM_WHITE_FRAC_PCT 90u     /* chunk is white if >= this %% of samples are */
-#define SM_TRAIL_WHITE    8u      /* consecutive white chunks after film => done */
+#define SM_WHITE_THRESH   40000u  /* 16-bit sample > this => open-gate "white"
+                                   * (open gate ~48900; film midtones ~15-19k; IR
+                                   * band ~32k; so only true open-gate visible
+                                   * samples clear this) */
+#define SM_WHITE_FRAC_PCT 60u     /* chunk is white if >= this %% of samples are.
+                                   * 60 not 90: each line is [visible|IR] and the
+                                   * ~25% IR band sits at ~32k (< threshold), so an
+                                   * open-gate chunk is only ~75% "white" -- 90%
+                                   * could never trip and the scan ran to the cap */
+#define SM_TRAIL_WHITE    24u     /* consecutive white chunks after film => done
+                                   * (generous so a blown-highlight patch within a
+                                   * frame doesn't false-stop) */
 #define SM_MAX_EMPTY      2u      /* empty windows (~5s each) AFTER film => end of roll */
 #define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
                                    * operator to feed the film (~5s each, ~2 min) */
 
-/* End-of-roll for the DRIVEN path is detected by UNIFORMITY, not brightness: the
- * open gate (no film) is a uniform field (low spatial variance) whether the lamp
- * makes it bright (positive/no-film) or not, whereas film -- positive OR negative
- * -- carries image detail (high variance). The old brightness test (sm_chunk_is_
- * white) fails on negatives, which transmit bright through the orange mask/clear
- * base and so never trip a "darker than open gate" rule. */
-#define SM_BLANK_MAD     1200u   /* mean-abs-deviation below this => uniform (no film) */
-#define SM_TRAIL_BLANK   16u     /* consecutive uniform chunks after film => end of roll
-                                  * (generous, so inter-frame gaps don't false-stop) */
-
-/* Is a 0x86 chunk dominated by open-gate white (no film)? (verbatim --autostop) */
+/* Is a 0x86 chunk dominated by open-gate white (no film in the gate)? Counts
+ * 16-bit samples above SM_WHITE_THRESH; an open-gate chunk is ~75% white (the IR
+ * band is the rest), film chunks ~0% (content is well below threshold). Used by
+ * both the driven loop's end-of-roll and verbatim --autostop. */
 static int sm_chunk_is_white(const uint8_t *buf, size_t got)
 {
     size_t samples = got / 2;
@@ -296,28 +298,6 @@ static int sm_chunk_is_white(const uint8_t *buf, size_t got)
         if (v > SM_WHITE_THRESH) white++;
     }
     return white * 100u >= samples * SM_WHITE_FRAC_PCT;
-}
-
-/* Is a 0x86 chunk a uniform field (no film in the gate)? Mean-absolute-deviation
- * of the 16-bit samples; low MAD = flat/uniform. Sampled for speed. Brightness-
- * agnostic, so it works for negatives too. */
-static int sm_chunk_is_blank(const uint8_t *buf, size_t got)
-{
-    size_t n = got / 2;
-    if (n < 256) return 0;
-    size_t stride = n > 4096 ? n / 4096 : 1;
-    uint64_t sum = 0; size_t cnt = 0;
-    for (size_t i = 0; i < n; i += stride) {
-        unsigned v = (unsigned)buf[2*i] | ((unsigned)buf[2*i+1] << 8);
-        sum += v; cnt++;
-    }
-    unsigned mean = (unsigned)(sum / cnt);
-    uint64_t adsum = 0;
-    for (size_t i = 0; i < n; i += stride) {
-        unsigned v = (unsigned)buf[2*i] | ((unsigned)buf[2*i+1] << 8);
-        adsum += (v > mean) ? (v - mean) : (mean - v);
-    }
-    return (unsigned)(adsum / cnt) < SM_BLANK_MAD;
 }
 
 /* After the script ends, keep polling + draining 0x86 until it goes quiet.
@@ -565,8 +545,8 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
     pakon_packet reply;
 
     printf("  [sm] driven image phase: poll HOST + read 0x86 (no re-arm); stop on "
-           "%u trailing-uniform chunks, %u empty windows after film, or %lu MB cap\n",
-           SM_TRAIL_BLANK, SM_MAX_EMPTY, max_mb);
+           "%u trailing open-gate chunks, %u empty windows after film, or %lu MB cap\n",
+           SM_TRAIL_WHITE, SM_MAX_EMPTY, max_mb);
 
     for (;;) {
         size_t got = 0;
@@ -577,14 +557,14 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
             *img_bytes += got;
             (*nimg)++;
             idle = 0;
-            if (sm_chunk_is_blank(buf, got)) {     /* uniform field = no film */
-                if (film_seen && ++trail_white >= SM_TRAIL_BLANK) {
-                    printf("  [sm] end-of-roll: %u uniform chunks after film "
+            if (sm_chunk_is_white(buf, got)) {     /* open-gate bright = no film */
+                if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
+                    printf("  [sm] end-of-roll: %u open-gate chunks after film "
                            "-> film fully scanned (%llu bytes)\n",
                            trail_white, *img_bytes);
                     break;
                 }
-            } else {                               /* image detail = film present */
+            } else {                               /* film in the gate */
                 if (!film_seen)
                     printf("  [sm] film detected at %llu bytes\n", *img_bytes);
                 film_seen = 1;
