@@ -219,17 +219,34 @@ def autocrop(rgb):
     Operates on the already de-wrapped, IR-removed visible image (a single
     contiguous zone). Rows: a row is non-image if it's very dark (leader) OR
     bright *and* neutral (light through no film). We keep the largest contiguous
-    run of image rows. Cols: trim the residual low-detail margins — after
-    de-wrapping the IR-adjacent edges (gate margin, orange-base sliver) sit at
-    the outer edges, where this drops them, leaving the continuous interior.
+    run of image rows. After that, further trim uniform (low-detail) rows from
+    both ends — this removes blank film base (orange mask, no exposure) that is
+    neither dark nor bright-neutral. Cols: trim residual low-detail margins.
     """
     full = float(rgb.max()) or 1.0
     sub = rgb[:, ::8, :].astype(np.float32)
-    bright = sub.mean((1, 2))                       # per-row brightness
-    spread = sub.max(2).mean(1) - sub.min(2).mean(1)  # per-row channel spread
+    bright = sub.mean((1, 2))
+    spread = sub.max(2).mean(1) - sub.min(2).mean(1)
     dark = bright < 0.06 * full
     blank = (bright > 0.55 * full) & (spread < 0.03 * full)
     r0, r1 = _all_runs(~(dark | blank))[0]
+
+    # Trim low-detail (uniform film base) from both ends. Sample every 4 rows;
+    # threshold at 25% of the median detail in the central half of the ribbon.
+    step = 4
+    lum_e = rgb[r0:r1 + 1:step, ::8, :].astype(np.float32)
+    row_det = lum_e.std(axis=(1, 2))
+    n = len(row_det)
+    mid_det = np.median(row_det[n // 4: 3 * n // 4]) if n > 4 else row_det.mean()
+    thresh = 0.25 * mid_det
+    trim_s = 0
+    while trim_s < n and row_det[trim_s] < thresh:
+        trim_s += 1
+    trim_e = n - 1
+    while trim_e > trim_s and row_det[trim_e] < thresh:
+        trim_e -= 1
+    r0 = r0 + trim_s * step
+    r1 = min(r1, r0 + (trim_e - trim_s + 1) * step)
 
     lum = rgb[r0:r1 + 1:15].astype(np.float32).mean(2)
     cs = lum.std(0)
@@ -241,9 +258,9 @@ def find_frame_boundaries(ribbon, n_frames):
     """Find row positions of (n_frames - 1) inter-frame boundaries.
 
     Inter-frame zones (unexposed film base between frames) appear as rows with
-    low spatial detail. The search uses a smoothed per-row detail signal and
-    finds the local minimum near each expected frame boundary rather than
-    dividing equally.
+    low spatial detail. Uses the central 50% of columns to avoid constant
+    film-edge stripes that make pre-roll and image rows indistinguishable.
+    Finds ALL local minima, ranks by prominence, selects the top (n_frames-1).
 
     Returns a sorted list of (n_frames - 1) row indices.
     """
@@ -251,29 +268,40 @@ def find_frame_boundaries(ribbon, n_frames):
     if n_frames <= 1:
         return []
 
-    # Subsample for speed: at most ~4000 rows, ~200 cols in the detail signal
-    step_r = max(1, rows // 4000)
-    step_c = max(1, cols // 200)
-    lum = ribbon[::step_r, ::step_c, :].astype(np.float32).mean(2)  # (R, C)
-    detail = lum.std(1)  # std across columns per row → shape (R,)
+    step_r = max(1, rows // 6000)
+    # Central 50% of columns — avoids film-edge stripes that appear in every
+    # row (including blank pre-roll), which mask the actual frame boundaries.
+    cen0, cen1 = cols // 4, 3 * cols // 4
+    step_c = max(1, (cen1 - cen0) // 200)
+    lum = ribbon[::step_r, cen0:cen1:step_c, :].astype(np.float32).mean(2)
+    detail = lum.std(1)
 
-    # Smooth with a box filter (~2% of ribbon)
     win = max(5, int(0.02 * len(detail)))
     kernel = np.ones(win) / win
     smoothed = np.convolve(detail, kernel, mode='same')
 
-    expected = len(smoothed) // n_frames
-    # Search window: ±25% of expected spacing
-    half = max(expected // 4, 10)
+    # Local-minimum half-window: ~1/3 of expected frame spacing
+    half = max(3, len(smoothed) // (3 * n_frames))
+    valleys = [i for i in range(half, len(smoothed) - half)
+               if smoothed[i] == smoothed[i - half: i + half + 1].min()]
 
+    if len(valleys) >= n_frames - 1:
+        def prominence(i):
+            l = smoothed[:i].max() if i > 0 else smoothed[i]
+            r = smoothed[i + 1:].max() if i < len(smoothed) - 1 else smoothed[i]
+            return min(l, r) - smoothed[i]
+        selected = sorted(sorted(valleys, key=lambda i: -prominence(i))[:n_frames - 1])
+        return [int(i * step_r) for i in selected]
+
+    # Fallback: equal-spacing with local search
+    expected = len(smoothed) // n_frames
+    half_fb = max(expected // 4, 10)
     boundaries = []
     for i in range(1, n_frames):
         center = i * expected
-        lo = max(0, center - half)
-        hi = min(len(smoothed), center + half)
-        local_min = lo + int(np.argmin(smoothed[lo:hi]))
-        boundaries.append(int(local_min * step_r))
-
+        lo = max(0, center - half_fb)
+        hi = min(len(smoothed), center + half_fb)
+        boundaries.append(int((lo + int(np.argmin(smoothed[lo:hi]))) * step_r))
     return sorted(boundaries)
 
 
@@ -409,15 +437,29 @@ def main():
 
     if fr > 1:
         boundaries = find_frame_boundaries(rgb, fr)
-        # Build split points: [0, b1, b2, ..., b_{n-1}, end]
         split_rows = [0] + boundaries + [rgb.shape[0]]
+        frame_widths = [split_rows[i + 1] - split_rows[i] for i in range(fr)]
+        # Normalize: all frames get the same width — median detected frame width
+        # capped at 3000 — center-cropped on each frame's detected content.
+        target_w = min(int(np.median(frame_widths)), 3000)
         print(f"frame boundaries (rows): {boundaries}")
+        print(f"frame widths: min={min(frame_widths)} med={target_w} max={max(frame_widths)}"
+              f"  -> normalising to {target_w}")
     else:
         split_rows = [0, rgb.shape[0]]
+        target_w = None
 
     for i in range(fr):
         r_start = split_rows[i]
         r_end = split_rows[i + 1]
+        if target_w is not None:
+            # Centre-crop to target_w; clamp to ribbon bounds
+            centre = (r_start + r_end) // 2
+            r_start = max(0, centre - target_w // 2)
+            r_end = r_start + target_w
+            if r_end > rgb.shape[0]:
+                r_end = rgb.shape[0]
+                r_start = max(0, r_end - target_w)
         part = rgb[r_start:r_end]
         if rot:
             part = np.rot90(part, k=rot)
