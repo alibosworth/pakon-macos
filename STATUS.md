@@ -51,7 +51,7 @@ algorithm, (3) driven C backend.
   sequential phases with **no film in the gate**:
   1. **Dark offset** (gate opaque, gain 0): per-channel mean → **target 300 ADU
      ±32**, proportional step `(300−mean)/38.4`, ≤8 iters, writes bank 0x84.5/6/7.
-  2. **Gain** (visible gate): per-channel peak → **target 64000 ADU** `[64000,64512]`,
+  2. **Gain** (visible gate): per-channel peak → **target 64000 ADU** `[64000,66048]`,
      ratio control `gain = round(factor·64000/peak)` with `factor = 1/(1−gain·k)`,
      ≤4 iters, writes bank 0x84.2/3/4.
   3. **Exposure** by 6-point sweep + per-channel OLS fit → bank 0x82.1/2/3, clamp
@@ -62,41 +62,47 @@ algorithm, (3) driven C backend.
   decoded the **filter-wheel/gate** setter `FUN_10033250` (TLA addr 0xf4, position
   codes 0xe3/0xe4 visible, 0xe5 opaque). Open constants (`_DAT_1006f268`≈64000.0,
   gain `k`≈1/63) and the **lamp F-135 wire address** to confirm on hardware.
+- **Milestone 3 IMPLEMENTED (2026-05-31) — driven CALIBRATE in C, tests pass,
+  awaiting hardware.** New module `src/pakon_calib.c` + `include/pakon_calib.h`:
+  - Pure core (unit-tested, hardware-free): `pakon_calib_build_write` builds the
+    `02 06 24 03 <bank> <reg> <v16>` frame to **addr 0x24** (test asserts it
+    reproduces the OEM seed bytes `02 06 24 03 84 05 33 01` = Offset_R −51, etc.);
+    AFE encoders (gain 6-bit, offset sign-mag, exposure 12-bit); B,R,G
+    deinterleave + per-channel mean/peak; convergence predicate; offset
+    proportional step; gain ratio + linearization factor.
+  - Hardware loops `pakon_calib_run`: dark-offset (≤8, mean→300±32) then gain
+    (≤4, peak→64000, window `[64000,66048]`). Driver `pakon_replay --calibrate`
+    [`--cal-lines N`] [`--cal-verbose`] opens, runs the open handshake, then the
+    driven loop, and prints converged gain/offset next to the OEM seeds.
+  - `test/test_calib.c` (15+ asserts) wired into ctest; all 3 suites green.
+  - **NEEDS-HARDWARE seam:** `calib_acquire` (kick `8a`+host-arm, read `0x86`).
+    Whether open-gate lines stream without the motor is the thing to learn on the
+    box. Caveat printed if dark/white read ~0 (acquisition spine needs extending).
 ### >>> NEXT TASK (resume here after a context clear) <<<
 
-**Milestone 3 of the capture-free backend: build the driven C CALIBRATE state
-machine.** Implement the algorithm now documented in `docs/REGISTERS.md` ("The
-CALIBRATE feedback algorithm" + "What this means for the driven C backend") as a
-real state in our backend: OPEN → param read → **CALIBRATE (measure+adjust)** →
-CONFIGURE (write computed gain/offset/exposure) → SCAN. We already own the CCD
-line read (Phase 5 `0x86` stream), the register-write frame, and the algorithm.
+**Milestone 3 hardware bring-up: run `pakon_replay --calibrate` on the Linux box
+and tune the acquisition seam.** The algorithm + register path are implemented and
+unit-tested; the open question is the open-gate (no-motor) acquisition handshake.
 
-**Capture mining DONE (2026-05-31) — addresses confirmed, no fresh capture needed.**
-Mined `resources/pakon_scan.pcapng` + `pakon_fullroll.pcapng` on the Mac:
-- ✅ **CALIBRATE/CONFIGURE register writes target wire addr `0x24` (PICM)** for BOTH
-  bank 0x82 (timing/exposure) and 0x84 (gain/offset) — frame `02 06 24 03 <bank>
-  <reg> <v16>`. Zero at 0x20 across both captures. **This corrects the old REGISTERS.md
-  "0x20 for CCD" note.** Motor/advance also 0x24. PICL (0x20) is a separate PIC
-  doing scan-time block exposure streaming + LED/geometry — likely illumination.
-- ✅ **No filter wheel on F-135** (gate codes 0xe3/e4/e5 never written). Dark-offset
-  must use lamp-off or the dark-leader rows, not an opaque gate.
-- ✅ **Seed values** (what a correct driven loop should hit): Gain R/G/B ≈ 0x0d (13),
-  Offset R/G/B ≈ −51/−42/−43, Height 0x0c1a. See REGISTERS.md "Sanity-check seeds".
-- ❌ **Lamp**: no 11500–14900 DAC value anywhere → F-235/335 `LampLevel` (0xf6) does
-  NOT apply to F-135. F-135 illumination control is the one real remaining unknown.
+On the Linux box (scanner operational `f135`, **open gate / no film**):
+```sh
+git pull --ff-only origin main && cmake --build build
+sudo ./build/pakon_replay --calibrate --cal-verbose
+```
+Expected if the acquisition spine works: dark_mean converges to ~300 and gain
+lands near the OEM seed (**gain≈13, offset≈−45**). Paste the printed result + any
+`PAKON_DEBUG=3` trace back here.
 
-Sequence to implement (CCD writes → addr `0x24`):
-1. Dark offset (lamp off / dark-leader rows, gain 0); loop ≤8: write offset 0x84.5/6/7,
-   grab 32 lines, mean→300±32, step `(300−mean)/38.4`.
-2. Gain (illuminated, nominal exposure); loop ≤4: write gain 0x84.2/3/4, grab 32 lines
-   averaged, peak→64000, `gain=round(factor·64000/peak)`, `factor=1/(1−gain·k)`.
-3. 6-pt exposure sweep + per-channel OLS → write exposure 0x82.1/2/3, clamp [0xd,0xfff].
-4. (Lamp trim is F-235/335 only — skip on F-135.)
+If dark_mean/white_peak read ~0, the CCD isn't streaming open-gate lines from just
+the OPEN handshake + `8a` kick — then extend the init spine in `calib_acquire` /
+`do_calibrate` using the pre-motor portion of `resources/scan.pakscan` (everything
+before `04 03 24 00 a0`), which is the OEM's real calibration-phase setup.
 
-Remaining unknowns (do NOT block steps 1–3; confirm on hardware):
-- **F-135 illumination/lamp control** — decompile the F-135 path or proceed with
-  device-default illumination for the first driven run.
-- `.data` target constants (`_DAT_1006f268`≈64000, gain `k`) — read back on hardware.
+Remaining unknowns (do NOT block the above; confirm on hardware):
+- **F-135 illumination/lamp control** — proceed with device-default illumination
+  for the first run; decode the F-135 lamp path later if gain won't converge.
+- `.data` target constants (`_DAT_1006f268`≈64000, gain `k`≈1/64) — read back on hw.
+- **Exposure phase** (6-pt OLS) not yet ported — add after offset+gain track the OEM.
 
 What to do with the scanner (milestone-3 test): implement steps 1–3 as a driven
 CALIBRATE state, run on the Linux box, and check the loop converges near the seed

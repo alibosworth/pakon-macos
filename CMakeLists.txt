@@ -21,12 +21,16 @@ add_library(pakon STATIC
   src/pakon_hex.c
   src/pakon_cmd.c
   src/pakon_usb.c
+  src/pakon_calib.c
 )
 target_include_directories(pakon PUBLIC ${CMAKE_SOURCE_DIR}/include)
 # libusb is an implementation detail of the transport layer, but a static
 # archive propagates its link deps; PkgConfig::LIBUSB carries the search dirs
 # so downstream targets (incl. test_proto) link cleanly.
 target_link_libraries(pakon PRIVATE PkgConfig::LIBUSB)
+# pakon_calib uses libm (gain linearization); expose it on the interface so the
+# tools and tests that link the static archive resolve the math symbols.
+target_link_libraries(pakon PUBLIC m)
 
 # --- tools (standalone, NOT SANE) ----------------------------------------
 add_executable(pakon_probe tools/pakon_probe.c)
@@ -44,6 +48,10 @@ add_test(NAME test_proto COMMAND test_proto)
 add_executable(test_hex test/test_hex.c)
 target_link_libraries(test_hex PRIVATE pakon)
 add_test(NAME test_hex COMMAND test_hex)
+
+add_executable(test_calib test/test_calib.c)
+target_link_libraries(test_calib PRIVATE pakon)
+add_test(NAME test_calib COMMAND test_calib)
 
 # NOTE: the SANE backend (backend/pakon.c) is built in Phase 6 against an
 # installed sane-backends; it is intentionally not a target yet.
