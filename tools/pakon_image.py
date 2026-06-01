@@ -254,55 +254,69 @@ def autocrop(rgb):
     return rgb[r0:r1 + 1, c0:c1 + 1], (r0, r1, c0, c1)
 
 
-def find_frame_boundaries(ribbon, n_frames):
-    """Find row positions of (n_frames - 1) inter-frame boundaries.
+def find_frame_boundaries(ribbon, n_frames=None):
+    """Find inter-frame boundary row positions.
 
-    Inter-frame zones (unexposed film base between frames) appear as rows with
-    low spatial detail. Uses the central 50% of columns to avoid constant
-    film-edge stripes that make pre-roll and image rows indistinguishable.
-    Finds ALL local minima, ranks by prominence, selects the top (n_frames-1).
+    If n_frames is given, returns exactly (n_frames-1) boundaries (top
+    by prominence). If n_frames is None, auto-detects frame count from
+    the valley prominence distribution: the largest ratio between
+    consecutive sorted prominence values marks the separation between
+    real inter-frame gaps and noise.
 
-    Returns a sorted list of (n_frames - 1) row indices.
+    Uses the central 50% of columns to avoid constant film-edge stripes.
+    Returns a sorted list of boundary row indices.
     """
     rows, cols, _ = ribbon.shape
-    if n_frames <= 1:
+    if n_frames is not None and n_frames <= 1:
         return []
 
     step_r = max(1, rows // 6000)
-    # Central 50% of columns — avoids film-edge stripes that appear in every
-    # row (including blank pre-roll), which mask the actual frame boundaries.
     cen0, cen1 = cols // 4, 3 * cols // 4
     step_c = max(1, (cen1 - cen0) // 200)
     lum = ribbon[::step_r, cen0:cen1:step_c, :].astype(np.float32).mean(2)
     detail = lum.std(1)
 
     win = max(5, int(0.02 * len(detail)))
-    kernel = np.ones(win) / win
-    smoothed = np.convolve(detail, kernel, mode='same')
+    smoothed = np.convolve(detail, np.ones(win) / win, mode='same')
 
-    # Local-minimum half-window: ~1/3 of expected frame spacing
-    half = max(3, len(smoothed) // (3 * n_frames))
+    half = max(3, len(smoothed) // (3 * (n_frames or 30)))
     valleys = [i for i in range(half, len(smoothed) - half)
                if smoothed[i] == smoothed[i - half: i + half + 1].min()]
 
-    if len(valleys) >= n_frames - 1:
-        def prominence(i):
-            l = smoothed[:i].max() if i > 0 else smoothed[i]
-            r = smoothed[i + 1:].max() if i < len(smoothed) - 1 else smoothed[i]
-            return min(l, r) - smoothed[i]
-        selected = sorted(sorted(valleys, key=lambda i: -prominence(i))[:n_frames - 1])
+    def prominence(i):
+        l = smoothed[:i].max() if i > 0 else smoothed[i]
+        r = smoothed[i + 1:].max() if i < len(smoothed) - 1 else smoothed[i]
+        return min(l, r) - smoothed[i]
+
+    prom = {i: prominence(i) for i in valleys}
+
+    if n_frames is not None:
+        # Caller knows the count: take top (n_frames-1) by prominence
+        if len(valleys) < n_frames - 1:
+            # Fallback: equal-spacing
+            expected = len(smoothed) // n_frames
+            half_fb = max(expected // 4, 10)
+            bnd = []
+            for k in range(1, n_frames):
+                lo = max(0, k * expected - half_fb)
+                hi = min(len(smoothed), k * expected + half_fb)
+                bnd.append(int((lo + int(np.argmin(smoothed[lo:hi]))) * step_r))
+            return sorted(bnd)
+        selected = sorted(sorted(valleys, key=lambda i: -prom[i])[:n_frames - 1])
         return [int(i * step_r) for i in selected]
 
-    # Fallback: equal-spacing with local search
-    expected = len(smoothed) // n_frames
-    half_fb = max(expected // 4, 10)
-    boundaries = []
-    for i in range(1, n_frames):
-        center = i * expected
-        lo = max(0, center - half_fb)
-        hi = min(len(smoothed), center + half_fb)
-        boundaries.append(int((lo + int(np.argmin(smoothed[lo:hi]))) * step_r))
-    return sorted(boundaries)
+    # Auto-detect: find the largest prominence ratio gap to separate real
+    # inter-frame gaps from noise, then keep everything above the threshold.
+    if not valleys:
+        return []
+    sorted_prom = sorted(prom[i] for i in valleys)
+    # Find the biggest jump between consecutive sorted prominence values
+    best_ratio, threshold = 1.0, sorted_prom[0]
+    for a, b in zip(sorted_prom, sorted_prom[1:]):
+        if a > 0 and b / a > best_ratio:
+            best_ratio, threshold = b / a, (a + b) / 2
+    real = sorted(i for i in valleys if prom[i] > threshold)
+    return [int(i * step_r) for i in real]
 
 
 def write_preview(rgb16, path, maxdim=1000):
@@ -325,9 +339,8 @@ def main():
     ap.add_argument("--order", default="rgb",
                     help="channel order of the interleave (default rgb)")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
-    ap.add_argument("--frames", type=int, default=1,
-                    help="split the ribbon into N frames using inter-frame gap "
-                         "detection (default 1 = full ribbon)")
+    ap.add_argument("--frames", type=int, default=None,
+                    help="split into N frames (default: auto-detect from valley count)")
     ap.add_argument("--crop-width", type=int,
                     help="keep only this many px of width (drop blank overscan)")
     ap.add_argument("--autocrop", action=argparse.BooleanOptionalAction,
@@ -431,22 +444,19 @@ def main():
     if args.invert:
         rgb = rgb.max() - rgb
 
-    # Find frame boundaries using inter-frame gap detection
-    fr = args.frames
     rot = (args.rotate // 90) % 4
 
+    boundaries = find_frame_boundaries(rgb, args.frames)
+    fr = len(boundaries) + 1 if boundaries else 1
+    split_rows = [0] + boundaries + [rgb.shape[0]]
+
     if fr > 1:
-        boundaries = find_frame_boundaries(rgb, fr)
-        split_rows = [0] + boundaries + [rgb.shape[0]]
         frame_widths = [split_rows[i + 1] - split_rows[i] for i in range(fr)]
-        # Normalize: all frames get the same width — median detected frame width
-        # capped at 3000 — center-cropped on each frame's detected content.
         target_w = min(int(np.median(frame_widths)), 3000)
-        print(f"frame boundaries (rows): {boundaries}")
-        print(f"frame widths: min={min(frame_widths)} med={target_w} max={max(frame_widths)}"
-              f"  -> normalising to {target_w}")
+        print(f"detected {fr} frames, boundaries (rows): {boundaries}")
+        print(f"frame widths: min={min(frame_widths)} med={int(np.median(frame_widths))} "
+              f"max={max(frame_widths)}  -> normalising to {target_w}")
     else:
-        split_rows = [0, rgb.shape[0]]
         target_w = None
 
     for i in range(fr):
