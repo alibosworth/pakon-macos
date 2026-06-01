@@ -43,7 +43,6 @@ WORK_DIR = Path("/tmp/pakon_web")
 _LINEWIDTH = 8000
 _REPO = Path(__file__).resolve().parent.parent
 RPD_PROFILE = _REPO / "profiles" / "rpd.pf"
-_FRAMES_PER_ROLL = 36   # fixed: a 36-exposure roll, by design (not user-tunable)
 
 
 def decode_raw(
@@ -129,9 +128,9 @@ def decode_raw(
     emit("Autocropping", 0.50)
     rgb, _ = autocrop(rgb)
 
-    # ── Fixed 36-frame grid ─────────────────────────────────────────────────────
+    # ── Frame grid (auto-detected count) ────────────────────────────────────────
     emit("Finding frame grid", 0.57)
-    cut_rows, pitch = find_frame_grid(rgb, _FRAMES_PER_ROLL)
+    cut_rows, pitch = find_frame_grid(rgb)
     n_out = max(0, len(cut_rows) - 1)
     if n_out <= 1:
         cut_rows, n_out, target_w = [0, rgb.shape[0]], 1, None

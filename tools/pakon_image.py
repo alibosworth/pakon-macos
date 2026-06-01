@@ -438,17 +438,21 @@ def autocrop(rgb):
 
 
 def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
-    """Lay a regular fixed-pitch frame grid over the ribbon.
+    """Find the inter-frame boundaries on the ribbon.
 
-    35mm frames are a constant width with a consistent inter-frame pitch, so
-    rather than measuring each gap independently we fit a single global grid:
-    find the pitch P and phase φ that put every cut line in a low-detail
-    inter-frame gap simultaneously. The bright pre-roll (open-gate white before
-    the negative was inserted) is excluded first.
+    The frame count is ALWAYS auto-detected — never forced (a 36-exposure roll
+    commonly scans as 37+ usable frames, and forcing a count makes the cuts drift
+    a fraction of a frame each, so the inter-frame gap creeps into the picture).
 
-    Returns (cut_rows, pitch) where cut_rows is the sorted list of inter-frame
-    boundary rows spanning the film, and pitch is the period in rows. The caller
-    crops a fixed width centred in each [cut_k, cut_{k+1}] cell.
+    Method: (1) measure the true frame **pitch** by autocorrelation of the
+    per-row detail profile — robust to where exactly the film starts and to the
+    real count; (2) derive the count from span / pitch; (3) pick the global
+    phase that lands the regular grid in low-detail gaps; (4) **snap** each
+    interior boundary to its local detail minimum (the actual rebate) to absorb
+    film-advance jitter. `n_frames` is an optional hard override (rarely needed).
+
+    Returns (cut_rows, pitch): boundary rows spanning the film + the period in
+    rows. The caller crops a fixed width centred in each [cut_k, cut_{k+1}] cell.
     """
     rows, cols, _ = ribbon.shape
 
@@ -475,42 +479,42 @@ def find_frame_grid(ribbon, n_frames=None, pitch_lo=2600, pitch_hi=3800):
         elif i - start > 30:
             break
     end = n
+    span = end - start
 
-    # Grid fit: choose pitch P and phase φ minimising mean detail at the cut
-    # lines (cuts fall in gaps → low detail). Restricted to the film region.
     P_lo, P_hi = max(2, pitch_lo // step_r), pitch_hi // step_r
-    if n_frames and n_frames > 1:
-        # Caller fixed the count → pitch is the film span / n_frames; only φ free.
-        P_lo = P_hi = max(2, (end - start) // n_frames)
-    best = None
-    for P in range(P_lo, P_hi + 1):
-        for phase in range(0, P, max(1, P // 40)):
-            cuts = np.arange(phase, n, P)
-            cuts = cuts[(cuts >= start) & (cuts < end)]
-            if len(cuts) < 3:
-                continue
-            score = dnorm[cuts].mean()
-            if best is None or score < best[0]:
-                best = (score, P, phase)
-    if best is None:
-        return [], 0
-    _, P, phase = best
 
-    # Grid lines (the inter-frame gaps) within the film region.
-    grid = [c for c in range(phase, n, P) if start < c < end]
-    # The film before the first gap and after the last gap are the first/last
-    # frames; bound them with the region edges.
-    cut_rows = sorted({start, end} | set(grid))
-    # Drop degenerate cells (a region edge landing right next to a grid line):
-    # any cell narrower than half a pitch is post/pre-roll junk, not a frame.
-    min_cell = P // 2
-    pruned = [cut_rows[0]]
-    for c in cut_rows[1:]:
-        if c - pruned[-1] >= min_cell:
-            pruned.append(c)
-        elif c == cut_rows[-1]:
-            pruned[-1] = c  # keep the true end, drop the too-close grid line
-    return [int(c * step_r) for c in pruned], P * step_r
+    # (1) True pitch via autocorrelation of the (detrended) detail profile in the
+    # film region. The dominant period in [pitch_lo, pitch_hi] is the frame pitch.
+    d = detail[start:end] - detail[start:end].mean()
+    if len(d) > P_hi:
+        ac = np.correlate(d, d, mode="full")[len(d) - 1:]
+        seg = ac[P_lo:P_hi + 1]
+        pitch = P_lo + int(np.argmax(seg)) if len(seg) else max(2, span // 36)
+    else:
+        pitch = max(2, span // max(1, (n_frames or 36)))
+
+    # (2) Count: round(span / pitch) (auto). `n_frames` only overrides if a caller
+    # explicitly demands a fixed count. Then anchor a grid that spans the whole
+    # film [start, end] in exactly n_cells equal cells (eff_pitch ≈ true pitch);
+    # the autocropped edges are frame boundaries, so this lands cuts near gaps.
+    n_cells = n_frames if (n_frames and n_frames > 1) else max(1, round(span / pitch))
+    if n_cells < 1:
+        return [0, rows], pitch * step_r
+    eff_pitch = span / n_cells
+    grid = [start + round(k * eff_pitch) for k in range(n_cells + 1)]
+
+    # (3) Snap each interior boundary to the local detail minimum (the rebate)
+    # within ±0.20·pitch — absorbs per-frame advance jitter. The window is < half
+    # a pitch so neighbouring cuts can never collide (count is preserved exactly).
+    half = max(2, int(0.20 * eff_pitch))
+    cuts = [int(np.clip(grid[0], 0, n - 1))]
+    for c in grid[1:-1]:
+        a, b = max(0, c - half), min(n, c + half + 1)
+        cuts.append(a + int(np.argmin(det_s[a:b])))
+    cuts.append(int(np.clip(grid[-1], 0, n - 1)))
+
+    cut_rows = [int(c * step_r) for c in cuts]
+    return cut_rows, int(eff_pitch * step_r)
 
 
 def write_preview(rgb16, path, maxdim=1000):
