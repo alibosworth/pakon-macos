@@ -340,6 +340,27 @@ use case needs, built only from proven behaviour (verbatim streaming + white
 detection, both validated on hardware). End-of-roll white tunables shared with
 the SM (`SM_TRAIL_WHITE` etc., above `do_scan`).
 
+**End-of-roll detection MUST stay disarmed through the pre-scan phase.** The
+captured script first replays the **calibration/positioning phase** — in
+`36frames.pakscan` that is the **first 1889 image reads, before motor-start
+`04 03 24 00 a0`** — during which the gate flashes open: long open-gate **white**
+runs interspersed with brief film. Arming there false-triggers "end of roll" within
+a few percent of the scan (the original `--autostop` "stops immediately" bug). Two
+guards, both required:
+- **Arm at motor-start.** `--autostop` ignores the `0x86` stream until it replays
+  `04 03 24 00 a0`. From there the CCD free-runs the real continuous scan (one long
+  film block), so trailing white genuinely means the film ran out. This is the
+  motor-start "offset" — keyed off the command, not a timer or read count.
+- **Film-band `film_seen`.** `film_seen` latches only on real film content
+  (`sm_chunk_has_film`: ≥`SM_FILM_FRAC_PCT` 10% of samples > `SM_FILM_THRESH` 8000),
+  not the dim pre-film leader (~2.4k mean, ~0% over 8000). Open-gate white also
+  clears 8000, but `sm_chunk_is_white` is tested first. Verified on `scan.raw`:
+  old logic stopped at chunk 531/11718; fixed arms at 1889 and stops at 11616, on
+  the true end-of-roll tail (final white run begins at 11593). `--scan-sm`'s image
+  loop only runs post-motor-start, so it needs only the film-band guard, not the
+  arming gate. Do **not** revert to the `sm_chunk_is_blank` variance detector: the
+  `[visible | IR]` line layout makes true open-gate *high*-variance.
+
 ### Poll-driven scan state machine — `pakon_replay --scan-sm` (shelved — stalls)
 
 Verbatim `--scan` is locked to the captured image-read count, so it only fits a
@@ -375,8 +396,11 @@ the gate is empty — it only starts once film reaches it. So the loop gates on
   `SM_MAX_EMPTY` (2) empty windows. Must NOT keep waiting on `0x80` busy here or
   the motor runs until the film ejects.
 
-Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT` 90, `SM_TRAIL_WHITE` 8,
-`SM_MAX_EMPTY` 2, `SM_LOAD_WAIT` 24, plus `--max-mb`. End-of-roll white is the
+Tunables: `SM_WHITE_THRESH` 40000, `SM_WHITE_FRAC_PCT` 60, `SM_TRAIL_WHITE` 24,
+`SM_FILM_THRESH` 8000, `SM_FILM_FRAC_PCT` 10, `SM_MAX_EMPTY` 2, `SM_LOAD_WAIT` 24,
+plus `--max-mb`. (`FRAC_PCT` 60 not 90: the ~25% IR band sits at ~32k, below the
+40k white threshold, so an open-gate chunk is only ~75% "white" — 90% never
+tripped.) End-of-roll white is the
 primary/faster stop (fires on trailing white *data*, before the film ejects);
 the empty-window backstop covers the case where the device just stops feeding.
 

@@ -283,6 +283,17 @@ static int hexbytes(const char *s, uint8_t *out, size_t max)
 #define SM_MAX_EMPTY      2u      /* empty windows (~5s each) AFTER film => end of roll */
 #define SM_LOAD_WAIT      24u     /* empty windows BEFORE film => waiting for the
                                    * operator to feed the film (~5s each, ~2 min) */
+#define SM_FILM_THRESH    8000u   /* 16-bit sample > this => real film-band content.
+                                   * Real C-41 film chunks run ~12k-27k mean with
+                                   * >=20%% of samples over this; the dim leader/edge
+                                   * light (~2.4k mean) has ~0%%. Used to gate
+                                   * film_seen so the dim pre-film leader is NOT
+                                   * mistaken for film (which armed end-of-roll
+                                   * before the open-gate load gap and stopped the
+                                   * scan immediately). */
+#define SM_FILM_FRAC_PCT  10u     /* chunk has film if >= this %% of samples clear
+                                   * SM_FILM_THRESH. 10 sits well between leader (0%%)
+                                   * and real film (>=20%%). */
 
 /* Is a 0x86 chunk dominated by open-gate white (no film in the gate)? Counts
  * 16-bit samples above SM_WHITE_THRESH; an open-gate chunk is ~75% white (the IR
@@ -298,6 +309,25 @@ static int sm_chunk_is_white(const uint8_t *buf, size_t got)
         if (v > SM_WHITE_THRESH) white++;
     }
     return white * 100u >= samples * SM_WHITE_FRAC_PCT;
+}
+
+/* Does a 0x86 chunk carry real film-band content (vs the dim pre-film leader)?
+ * Counts 16-bit samples above SM_FILM_THRESH: real C-41 film (visible 15-19k +
+ * IR ~32k) clears it on nearly every sample; the dim leader/edge light (~2.4k)
+ * clears it on ~0%%. Used to gate film_seen so the leader is NOT mistaken for
+ * film -- the open-gate gap at the film-load point used to trip end-of-roll
+ * because the dim leader had already (wrongly) armed it. Open-gate white also
+ * clears this threshold, but callers test sm_chunk_is_white() FIRST. */
+static int sm_chunk_has_film(const uint8_t *buf, size_t got)
+{
+    size_t samples = got / 2;
+    if (samples == 0) return 0;
+    size_t lit = 0;
+    for (size_t i = 0; i + 1 < got; i += 2) {
+        unsigned v = (unsigned)buf[i] | ((unsigned)buf[i + 1] << 8);
+        if (v > SM_FILM_THRESH) lit++;
+    }
+    return lit * 100u >= samples * SM_FILM_FRAC_PCT;
 }
 
 /* After the script ends, keep polling + draining 0x86 until it goes quiet.
@@ -380,11 +410,18 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
      * shorter film just stops earlier. */
     int film_seen = 0, stop_early = 0;
     unsigned trail_white = 0;
+    /* End-of-roll detection must stay DISARMED through the pre-scan phase: the
+     * captured script first replays ~1889 calibration/positioning image reads in
+     * which the gate flashes open (long open-gate WHITE runs) with brief film in
+     * between. Those would false-trigger end-of-roll. Arm only once the motor
+     * starts (04 03 24 00 a0) -- from there the CCD free-runs the real scan and
+     * trailing white genuinely means the film has run out. (This is the "offset"
+     * that keyed off motor-start, not the leader.) */
+    int scan_armed = 0;
 
     if (autostop)
-        printf("  [autostop] will stop at end-of-roll white "
-               "(%u trailing-white chunks after film); feed film promptly on green\n",
-               SM_TRAIL_WHITE);
+        printf("  [autostop] will arm at motor-start, then stop at end-of-roll "
+               "white (%u trailing-white chunks after film)\n", SM_TRAIL_WHITE);
 
     while (fgets(line, sizeof(line), fp)) {
         char *p = line;
@@ -397,6 +434,15 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
             /* Save the command bytes before the reply overwrites buf. */
             uint8_t snd[8]; int sn = n < (int)sizeof(snd) ? n : (int)sizeof(snd);
             memcpy(snd, buf, (size_t)sn);
+            /* Arm end-of-roll detection at motor-start (04 03 24 00 a0): the real
+             * continuous scan begins here; everything before is pre-scan. */
+            if (autostop && !scan_armed && sn >= 5 &&
+                snd[0] == 0x04 && snd[1] == 0x03 && snd[2] == 0x24 &&
+                snd[3] == 0x00 && snd[4] == 0xa0) {
+                scan_armed = 1;
+                printf("  [autostop] motor started at read %lu -> arming end-of-roll\n",
+                       nimg);
+            }
             int trace = trace_status && trace_interesting(snd, n);
             size_t sent = 0, got = 0;
             r = pakon_usb_send(dev, PAKON_EP_CMD_OUT, buf, (size_t)n, &sent, timeout);
@@ -425,7 +471,7 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
             if (r != PAKON_OK && r != PAKON_ERR_TIMEOUT) errs++;
             if (++nimg % 1000 == 0)
                 printf("  ... %lu image reads, %llu bytes\n", nimg, img_bytes);
-            if (autostop && got) {
+            if (autostop && scan_armed && got) {
                 if (sm_chunk_is_white(buf, got)) {
                     if (film_seen && ++trail_white >= SM_TRAIL_WHITE) {
                         printf("  [autostop] end-of-roll white (%u chunks) after "
@@ -434,12 +480,15 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
                         stop_early = 1;
                         break;
                     }
-                } else {
+                } else if (sm_chunk_has_film(buf, got)) {
                     if (!film_seen)
                         printf("  [autostop] film detected at read %lu\n", nimg);
                     film_seen = 1;
                     trail_white = 0;
                 }
+                /* else: dim leader / dark gap -- neither film nor open-gate, so
+                 * don't arm film_seen (its premature latch on the leader was the
+                 * "stops immediately at the load gap" bug). */
             }
         } else if (*p == 'C') {                           /* control xfer */
             unsigned brt, breq, wval, widx, wlen; int consumed = 0;
@@ -564,12 +613,13 @@ static void sm_scan_loop(pakon_dev *dev, FILE *img, unsigned long long *img_byte
                            trail_white, *img_bytes);
                     break;
                 }
-            } else {                               /* film in the gate */
+            } else if (sm_chunk_has_film(buf, got)) {  /* real film in the gate */
                 if (!film_seen)
                     printf("  [sm] film detected at %llu bytes\n", *img_bytes);
                 film_seen = 1;
                 trail_white = 0;
             }
+            /* else: dim leader / dark gap -- don't latch film_seen on it. */
             if (max_bytes && *img_bytes >= max_bytes) {
                 printf("  [sm] hit safety cap %lu MB -> stopping\n", max_mb);
                 break;
