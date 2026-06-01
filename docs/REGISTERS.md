@@ -205,7 +205,7 @@ nominal 100 lines. Iterate per channel toward a near-saturation white:
 ```
 gain[R,G,B] = 0;  factor[R,G,B] = 1.0
 for iter in 0..3 (max 4):                # break when all 3 converged
-    converged if 64000 ≤ peak ≤ 64512    # FUN_100215a0(peak, 64000, 0, 0x800)
+    converged if 64000 ≤ peak ≤ 66048    # FUN_100215a0(peak, 64000, 0, 0x800)
     write Gain registers (bank 0x84.2/3/4)     via FUN_1002f9c0
     write integration/exposure                 via FUN_10032d20 (exp=100, 1 line)
     acquire 4ch × 32 lines (averaged)    via FUN_10021bd0(nCh=4, divisor=0x20, avg=1)
@@ -217,7 +217,7 @@ for iter in 0..3 (max 4):                # break when all 3 converged
 ```
 
 Target = **64000 ADU** peak (~98% of 16-bit full scale), asymmetric tolerance
-`[64000, 64512]` (no lower slack). Multiplicative (ratio) control, 4 iters max.
+`[64000, 66048]` (0x800=2048 upper slack, no lower). Multiplicative (ratio) control, 4 iters max.
 The `factor = 1/(1 - gain·k)` term linearizes the 6-bit gain register so the next
 ratio estimate accounts for the gain already applied.
 
@@ -239,7 +239,7 @@ reg 0x80), then `Sleep(2000)` and the outer pass retries.
 | stage | register(s) | target | tolerance | control | max iters |
 |-------|-------------|--------|-----------|---------|-----------|
 | dark offset | 0x84.5/6/7 | 300 ADU mean | ±32 | proportional `(300-m)/38.4` | 8 |
-| gain | 0x84.2/3/4 | 64000 ADU peak | `[64000,64512]` | ratio `factor·64000/peak` | 4 |
+| gain | 0x84.2/3/4 | 64000 ADU peak | `[64000,66048]` | ratio `factor·64000/peak` | 4 |
 | exposure | 0x82.1/2/3 | (regression fit) | — | OLS slope, 6-pt sweep | 2 outer |
 | lamp trim | 0xf6.0x80 | coverage ≥ 0x6e | — | `level -= deficit·50` | retry ×2 |
 

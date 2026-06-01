@@ -12,6 +12,7 @@
 #include "pakon_usb.h"
 #include "pakon_proto.h"
 #include "pakon_cmd.h"
+#include "pakon_calib.h"
 #include "pakon_log.h"
 
 #include <stdio.h>
@@ -787,6 +788,76 @@ static int do_scan_sm(const char *script, const char *image_path, unsigned timeo
     return rc;
 }
 
+/* ---- Phase 6 / milestone 3: driven CALIBRATE -----------------------------
+ *
+ * Opens the device, replays the OPEN handshake to Idle, then runs the DRIVEN
+ * calibration (measure open-gate CCD -> compute gain/offset) instead of
+ * replaying frozen values. Prints the converged registers next to the OEM seed
+ * values so a hardware run shows immediately whether the loop tracks the OEM.
+ *
+ * NEEDS-HARDWARE: this assumes the open gate (no film) is presented. The CCD
+ * init beyond the OPEN handshake may need extending on hardware (see
+ * pakon_calib_run / calib_acquire). Run on the Linux box and iterate. */
+static int do_calibrate(unsigned timeout, size_t nlines, int verbose)
+{
+    pakon_ctx *ctx = NULL;
+    if (pakon_usb_init(&ctx) != PAKON_OK) { fprintf(stderr, "init failed\n"); return 1; }
+    pakon_dev *dev = NULL;
+    pakon_result r = pakon_usb_open(ctx, &dev);
+    if (r != PAKON_OK) {
+        fprintf(stderr, "open device failed: %s (need operational f135)\n",
+                pakon_result_str(r));
+        pakon_usb_exit(ctx); return 1;
+    }
+    if (pakon_usb_claim(dev, 0, 0) != PAKON_OK) {
+        fprintf(stderr, "claim failed\n");
+        pakon_usb_close(dev); pakon_usb_exit(ctx); return 1;
+    }
+
+    /* Bring the device to Idle via the captured open handshake. */
+    size_t nseq = sizeof(OPEN_SEQ) / sizeof(OPEN_SEQ[0]);
+    for (size_t i = 0; i < nseq; i++) {
+        const open_step *s = &OPEN_SEQ[i];
+        pakon_packet cmd, reply;
+        pakon_packet_build(&cmd, s->out[0], s->out + 2, s->out[1]);
+        if (pakon_cmd(dev, &cmd, &reply, timeout) != PAKON_OK)
+            fprintf(stderr, "  open step '%s' failed (continuing)\n", s->label);
+    }
+    printf("open handshake done; running driven calibration "
+           "(present the open gate, no film)...\n");
+
+    pakon_calib_opts opts = {0};
+    opts.nlines = nlines;
+    opts.timeout_ms = timeout < 2000 ? 2000 : timeout;
+    opts.do_dark = 1;
+    opts.do_gain = 1;
+    opts.verbose = verbose;
+
+    pakon_calib_result res;
+    r = pakon_calib_run(dev, &opts, &res);
+
+    pakon_usb_release(dev);
+    pakon_usb_close(dev);
+    pakon_usb_exit(ctx);
+
+    if (r != PAKON_OK) {
+        fprintf(stderr, "calibration failed: %s\n", pakon_result_str(r));
+        return 1;
+    }
+
+    printf("\n=== calibration result (OEM seeds: gain~13, offset~-45) ===\n");
+    const char *ch = "RGB";
+    for (int k = 0; k < 3; k++)
+        printf("  %c: gain=%-3d offset=%-5d  dark_mean=%-6u white_peak=%u\n",
+               ch[k], res.gain[k], res.offset[k], res.dark[k], res.white[k]);
+    printf("  dark offset converged: %s | gain converged: %s\n",
+           res.offset_converged ? "yes" : "NO",
+           res.gain_converged ? "yes" : "NO");
+    printf("\nNOTE: if dark_mean/white_peak read ~0, the open-gate acquisition "
+           "spine needs extending (see calib_acquire). This is the seam to tune.\n");
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -794,10 +865,15 @@ static void usage(const char *argv0)
         "       %s --scan FILE [--image OUT] [--drain] [--autostop]  scan replay\n"
         "       %s --scan-sm FILE [--image OUT] [--max-mb N]  poll-driven scan\n"
         "       %s --open                                verify open handshake\n"
+        "       %s --calibrate [--cal-lines N] [--cal-verbose]  driven calibration\n"
         "\n"
         "  FILE.pakscan  positional: replay advance script, then poll until idle\n"
         "  --limit SEC   wall-clock limit for the advance poll loop (default 60)\n"
         "  --open        replay the captured open handshake, verify replies\n"
+        "  --calibrate   run the driven CALIBRATE (measure open-gate CCD ->\n"
+        "                compute gain/offset); present the open gate, no film\n"
+        "  --cal-lines N  CCD lines to average per measurement (default 32)\n"
+        "  --cal-verbose  log each calibration iteration\n"
         "  --scan FILE   replay a .pakscan scan script verbatim (fixed length)\n"
         "  --scan-sm FILE  replay setup spine, then drive the image transfer and\n"
         "                  stop on end-of-roll white (any roll length)\n"
@@ -812,12 +888,14 @@ static void usage(const char *argv0)
         "  --timeout MS  USB per-transfer timeout in ms (default 1000)\n"
         "\n"
         "Set PAKON_DEBUG=0..4 for increasing trace verbosity.\n",
-        argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
 {
     int want_open = 0, drain = 0, trace_status = 0, autostop = 0;
+    int want_calibrate = 0, cal_verbose = 0;
+    unsigned long cal_lines = 32;
     const char *scan_file = NULL;
     const char *scan_sm_file = NULL;
     const char *advance_file = NULL;
@@ -833,6 +911,12 @@ int main(int argc, char **argv)
             return 0;
         } else if (!strcmp(argv[i], "--open")) {
             want_open = 1;
+        } else if (!strcmp(argv[i], "--calibrate")) {
+            want_calibrate = 1;
+        } else if (!strcmp(argv[i], "--cal-lines") && i + 1 < argc) {
+            cal_lines = strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--cal-verbose")) {
+            cal_verbose = 1;
         } else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {
             scan_file = argv[++i];
         } else if (!strcmp(argv[i], "--scan-sm") && i + 1 < argc) {
@@ -862,11 +946,13 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!want_open && !scan_file && !scan_sm_file && !advance_file) {
+    if (!want_open && !want_calibrate && !scan_file && !scan_sm_file && !advance_file) {
         usage(argv[0]);
         return 2;
     }
 
+    if (want_calibrate)
+        return do_calibrate(timeout, (size_t)cal_lines, cal_verbose);
     if (advance_file)
         return do_advance(advance_file, timeout, limit_sec, steps_count);
     if (scan_sm_file)
