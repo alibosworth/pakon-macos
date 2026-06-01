@@ -24,7 +24,6 @@ if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
 from pakon_image import (  # noqa: E402
-    autocrop,
     find_frame_grid,
     find_ir_band,
     invert_c41,
@@ -48,8 +47,13 @@ _FRAME_W = 3000                # fixed crop width (long axis), capped at pitch
 
 
 def _build_ribbon(raw_path, emit):
-    """Deinterleave → fixed per-zone channel order → trilinear registration →
-    autocrop. Returns the assembled negative ribbon (rows=long axis, cols=width)."""
+    """Deinterleave → fixed per-zone channel order → trilinear registration.
+    Returns the FULL assembled negative ribbon (rows=long axis, cols=width).
+
+    Autocrop is intentionally NOT applied: it kept only the single largest run
+    of image rows, which silently dropped every frame past an interior dark
+    exposure / dense rebate (a 36-exp roll came out as ~13). Frames are now
+    placed manually in the web UI, so we show the whole ribbon end to end."""
     emit("Loading", 0.0)
     raw = np.memmap(str(raw_path), dtype="<u2", mode="r")
     lw = _LINEWIDTH
@@ -75,9 +79,6 @@ def _build_ribbon(raw_path, emit):
              for i, (c0, c1) in enumerate(zones)]
     rgb = register_zones(chans, zones, leads,
                          correct_seam=len(zones) == 2, zone_perms=zone_perms)
-
-    emit("Autocropping", 0.55)
-    rgb, _ = autocrop(rgb)
     return rgb
 
 
@@ -129,10 +130,14 @@ def prescan(raw_path, progress=None) -> dict:
     }
 
 
-def export_frames(ribbon_path, base, centres, rotate=90, frame_w=_FRAME_W,
-                  progress=None) -> list[dict]:
-    """Stage 2. Crop the cached ribbon at each confirmed centre (fixed width,
-    centred), run the full C-41 inversion + rpd.pf render, write TIFF/JPEG."""
+def export_frames(ribbon_path, base, centres, widths=None, rotate=90,
+                  frame_w=_FRAME_W, progress=None) -> list[dict]:
+    """Stage 2. Crop the cached ribbon at each confirmed centre, run the full
+    C-41 inversion + rpd.pf render, write TIFF/JPEG.
+
+    `widths` is an optional per-frame crop width (full-res rows) parallel to
+    `centres` — lets the operator mix full- and half-frame boxes. When omitted,
+    every crop uses `frame_w`."""
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     def emit(step, pct):
@@ -145,15 +150,16 @@ def export_frames(ribbon_path, base, centres, rotate=90, frame_w=_FRAME_W,
     lut = _c41_lut()
     use_rpd = RPD_PROFILE.exists()
     rot_k = (rotate // 90) % 4
-    half = frame_w // 2
     frames = []
     n = len(centres)
 
     for i, centre in enumerate(centres):
         emit(f"Exporting frame {i + 1}/{n}", (i + 1) / max(1, n))
+        fw = int(widths[i]) if widths else frame_w
+        half = fw // 2
         r0 = max(0, int(centre) - half)
-        r1 = min(rows, r0 + frame_w)
-        r0 = max(0, r1 - frame_w)
+        r1 = min(rows, r0 + fw)
+        r0 = max(0, r1 - fw)
         part = np.ascontiguousarray(rgb[r0:r1])
         if rot_k:
             part = np.ascontiguousarray(np.rot90(part, k=rot_k))

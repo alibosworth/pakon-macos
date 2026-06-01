@@ -324,6 +324,7 @@ async def api_preview():
 @app.post("/api/export_frames")
 async def api_export_frames(
     centres: list[int] = Body(..., embed=True),
+    widths: list[int] | None = Body(default=None, embed=True),
     rotate: int = Body(default=90, embed=True),
 ):
     meta = _state["prescan"]
@@ -343,7 +344,8 @@ async def api_export_frames(
 
     def _work(prog):
         return export_frames(meta["ribbon"], meta["base"], centres,
-                             rotate=rotate, frame_w=meta["frame_w"], progress=prog)
+                             widths=widths, rotate=rotate,
+                             frame_w=meta["frame_w"], progress=prog)
 
     def _done(result):
         _state["frames"] = result

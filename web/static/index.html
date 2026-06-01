@@ -341,7 +341,14 @@
   <div class="frames-header">
     <h2 id="confirm-title">Confirm frames</h2>
     <div class="row">
-      <span class="msg" id="confirm-hint">← → nudge · ↑ ↓ prev/next · Enter next · click to place</span>
+      <span class="msg" id="confirm-hint">← → nudge · ↑ ↓ prev/next · Enter add · Delete remove · click to place</span>
+      <label class="field">
+        Box
+        <select id="box-size">
+          <option value="full" selected>Full frame</option>
+          <option value="half">Half frame</option>
+        </select>
+      </label>
       <button class="ghost" id="frame-add">+ Add</button>
       <button class="ghost" id="frame-del">− Remove</button>
       <button id="export-btn">Export <span id="export-count"></span> frames</button>
@@ -613,7 +620,7 @@
 
   // ── Process = prescan (long preview + detected frame centres) ──────────────
   let meta = null;      // prescan metadata
-  let crops = [];       // confirmed crop centres (full-res rows)
+  let crops = [];       // confirmed crops: {c: centre row, w: width} in full res
   let cur = 0;          // current frame index
 
   $('proc-btn').addEventListener('click', async () => {
@@ -639,7 +646,7 @@
         meta = ev;
         startConfirm();
         setMsg($('proc-msg'),
-               `${ev.centres.length} frames detected — confirm crops below`, 'ok');
+               'Place frames — Enter adds the next box, Delete removes one', 'ok');
       } else if (ev.type === 'error') {
         setMsg($('proc-msg'), ev.message, 'err');
       }
@@ -649,7 +656,11 @@
 
   // ── Confirm frames (interactive crop placement) ────────────────────────────
   function startConfirm() {
-    crops = meta.centres.slice();
+    // Start with a single box near the first detected frame; the operator adds
+    // the rest with Enter (and removes with Delete). The full ribbon is shown.
+    const first = (meta.centres && meta.centres.length)
+      ? meta.centres[0] : Math.round(meta.frame_w / 2);
+    crops = [{ c: first, w: boxSize() }];
     cur = 0;
     $('strip-img').src = '/api/preview?t=' + Date.now();
     $('strip-inner').style.width = meta.preview_w + 'px';
@@ -659,16 +670,18 @@
   }
 
   const fullToPx = c => c * meta.scale;                 // full row -> preview x
-  const boxW = () => meta.frame_w * meta.scale;
+  // Box width (full-res rows) for the size selected in the dropdown.
+  const boxSize = () => $('box-size').value === 'half'
+    ? Math.round(meta.frame_w / 2) : meta.frame_w;
 
   function renderStrip() {
     const inner = $('strip-inner');
     inner.querySelectorAll('.cropbox').forEach(e => e.remove());
-    const w = boxW();
-    crops.forEach((c, i) => {
+    crops.forEach((cp, i) => {
+      const w = cp.w * meta.scale;
       const box = document.createElement('div');
       box.className = 'cropbox' + (i === cur ? ' active' : '');
-      box.style.left = (fullToPx(c) - w / 2) + 'px';
+      box.style.left = (fullToPx(cp.c) - w / 2) + 'px';
       box.style.width = w + 'px';
       box.innerHTML = `<span class="lbl">${i + 1}</span>`;
       box.onclick = () => { cur = i; renderStrip(); };
@@ -678,21 +691,25 @@
       `Confirm frames — ${cur + 1} / ${crops.length}`;
     $('export-count').textContent = crops.length;
     // keep the active box in view
-    const wrap = $('strip-wrap'), x = fullToPx(crops[cur]);
+    const wrap = $('strip-wrap'), x = fullToPx(crops[cur].c);
     if (x < wrap.scrollLeft + 80 || x > wrap.scrollLeft + wrap.clientWidth - 80)
       wrap.scrollLeft = x - wrap.clientWidth / 2;
   }
 
   function nudge(dpx) {                  // dpx in preview pixels -> full rows
-    crops[cur] = Math.max(0, Math.min(meta.rows,
-      crops[cur] + Math.round(dpx / meta.scale)));
+    crops[cur].c = Math.max(0, Math.min(meta.rows,
+      crops[cur].c + Math.round(dpx / meta.scale)));
     renderStrip();
   }
   const step = () => Math.max(4, Math.round(meta.pitch * 0.004));  // micro (full rows)
   function go(d) { cur = Math.max(0, Math.min(crops.length - 1, cur + d)); renderStrip(); }
   function addFrame() {
-    const c = Math.min(meta.rows, crops[crops.length - 1] + meta.pitch);
-    crops.push(c); cur = crops.length - 1; renderStrip();
+    // Place the new box of the selected size immediately after the last one
+    // (edge to edge), so full and half frames tile correctly when added in a run.
+    const w = boxSize();
+    const last = crops[crops.length - 1];
+    const c = Math.min(meta.rows, last.c + Math.round((last.w + w) / 2));
+    crops.push({ c, w }); cur = crops.length - 1; renderStrip();
   }
   function delFrame() {
     if (crops.length <= 1) return;
@@ -701,23 +718,31 @@
 
   $('frame-add').addEventListener('click', addFrame);
   $('frame-del').addEventListener('click', delFrame);
+  // Changing the dropdown resizes the currently selected box.
+  $('box-size').addEventListener('change', () => {
+    if (crops.length) { crops[cur].w = boxSize(); renderStrip(); }
+    $('strip-wrap').focus();
+  });
 
   // click on the strip background to place the current crop there
   $('strip-inner').addEventListener('click', e => {
     if (e.target.closest('.cropbox')) return;
     const rect = $('strip-inner').getBoundingClientRect();
-    crops[cur] = Math.round((e.clientX - rect.left) / meta.scale);
+    crops[cur].c = Math.round((e.clientX - rect.left) / meta.scale);
     renderStrip();
   });
 
-  // keyboard: ←/→ nudge (Shift = coarse), ↑/↓ prev/next, Enter next
+  // keyboard: ←/→ nudge (Shift = coarse), ↑/↓ prev/next,
+  // Enter adds a box, Delete/Backspace removes the current one
   window.addEventListener('keydown', e => {
     if ($('confirm-card').classList.contains('hidden')) return;
     const k = e.key, big = e.shiftKey ? 6 : 1;
     if (k === 'ArrowLeft')       { nudge(-step() * big * meta.scale); }
     else if (k === 'ArrowRight') { nudge(step() * big * meta.scale); }
     else if (k === 'ArrowUp')    { go(-1); }
-    else if (k === 'ArrowDown' || k === 'Enter') { go(1); }
+    else if (k === 'ArrowDown')  { go(1); }
+    else if (k === 'Enter')      { addFrame(); }
+    else if (k === 'Delete' || k === 'Backspace') { delFrame(); }
     else return;
     e.preventDefault();
   });
@@ -732,7 +757,9 @@
     $('frames-grid').innerHTML = '';
 
     await postSSE('/api/export_frames',
-      { centres: crops.map(c => Math.round(c)), rotate: parseInt($('rotate').value) },
+      { centres: crops.map(c => Math.round(c.c)),
+        widths: crops.map(c => Math.round(c.w)),
+        rotate: parseInt($('rotate').value) },
       ev => {
         if (ev.type === 'progress') {
           $('exp-prog').value = ev.pct;
