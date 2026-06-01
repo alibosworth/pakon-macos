@@ -295,10 +295,7 @@
     </label>
   </div>
   <div class="row" style="margin-top: 14px;">
-    <label class="field">
-      Frames
-      <input type="number" id="frames" value="0" min="0" max="72" title="0 = auto-detect">
-    </label>
+    <span class="msg" title="A 36-exposure roll with the OEM C-41 inversion (auto channel-order + Kodak rpd.pf render). Fixed by design.">36-exposure roll · C-41 colour</span>
     <label class="field">
       Rotate
       <select id="rotate">
@@ -308,28 +305,9 @@
         <option value="270">270°</option>
       </select>
     </label>
-    <label class="field" title="Interleave phase — fixed by the scan/replay mode, not the film">
-      Colour
-      <select id="order">
-        <option value="012" selected>36-exp</option>
-        <option value="120">Legacy</option>
-        <option value="201">Phase 2</option>
-      </select>
-    </label>
-    <label class="field" title="Density (log) inversion removes the C-41 orange-mask floor that lifts shadows; linear is the older flat inversion">
-      Invert
-      <select id="invert">
-        <option value="density" selected>Density</option>
-        <option value="linear">Linear</option>
-      </select>
-    </label>
     <label class="field" title="Keep this % of the frame centre; trims the edge rebate/gap band. 100 = full frame">
       Crop %
       <input type="number" id="crop" value="100" min="50" max="100" step="1">
-    </label>
-    <label class="field">
-      Resample
-      <input type="text" id="resample" placeholder="e.g. 3000x2000">
     </label>
     <button id="proc-btn" disabled>Process</button>
   </div>
@@ -346,9 +324,10 @@
     <h2 id="frames-title">Frames</h2>
     <div class="row">
       <span class="msg">Export:</span>
-      <button class="ghost" id="export-raw">Raw TIFFs</button>
-      <button class="ghost" id="export-tiff">Inverted TIFFs</button>
-      <button class="ghost" id="export-jpeg">Inverted JPEGs</button>
+      <button class="ghost" id="export-jpeg">JPEGs</button>
+      <button class="ghost" id="export-contact">Contact sheet</button>
+      <button class="ghost" id="export-tiff">TIFFs</button>
+      <button class="ghost" id="export-raw">Raw negatives</button>
       <button class="ghost" id="clear-btn" style="border-color: var(--red); color: var(--red);">Clear</button>
     </div>
   </div>
@@ -602,13 +581,8 @@
     $('frames-grid').innerHTML = '';
 
     const fd = new FormData();
-    fd.append('frames',  $('frames').value);
-    fd.append('rotate',  $('rotate').value);
-    fd.append('order',   $('order').value);
-    fd.append('invert',  $('invert').value);
-    fd.append('crop',    $('crop').value);
-    const rs = $('resample').value.trim();
-    if (rs) fd.append('resample', rs);
+    fd.append('rotate', $('rotate').value);
+    fd.append('crop',   $('crop').value);
     if (uploadFile) fd.append('file', uploadFile);
 
     await postSSE('/api/process', fd, ev => {
@@ -660,9 +634,10 @@
   }
 
   // ── Export zip ───────────────────────────────────────────────────────────
-  $('export-raw').addEventListener('click',  () => window.location = '/api/export?fmt=raw');
-  $('export-tiff').addEventListener('click', () => window.location = '/api/export?fmt=tiff');
-  $('export-jpeg').addEventListener('click', () => window.location = '/api/export?fmt=jpeg');
+  $('export-raw').addEventListener('click',     () => window.location = '/api/export?fmt=raw');
+  $('export-tiff').addEventListener('click',    () => window.location = '/api/export?fmt=tiff');
+  $('export-jpeg').addEventListener('click',    () => window.location = '/api/export?fmt=jpeg');
+  $('export-contact').addEventListener('click', () => window.location = '/api/contact');
 
   // ── Clear current scan + temp files ────────────────────────────────────────
   $('clear-btn').addEventListener('click', async () => {

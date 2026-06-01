@@ -17,7 +17,8 @@ POST /api/process                 SSE — decode .raw (upload or last scan)
 GET  /api/frames                  list decoded frames
 GET  /api/frames/{n}/thumb        JPEG thumbnail
 GET  /api/frames/{n}/tiff         16-bit TIFF download
-GET  /api/export                  zip of all TIFFs
+GET  /api/export                  zip of all frames (fmt=raw|tiff|jpeg)
+GET  /api/contact                 JPEG contact sheet of all frames
 """
 import asyncio
 import json
@@ -30,7 +31,7 @@ from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .decode import WORK_DIR, decode_raw
+from .decode import WORK_DIR, decode_raw, make_contact_sheet
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -238,13 +239,11 @@ async def api_mkdir(path: str = Body(...), name: str = Body(...)):
 @app.post("/api/process")
 async def api_process(
     file: UploadFile | None = File(default=None),
-    frames: int = Form(default=0),   # 0 = auto-detect from the frame grid
     rotate: int = Form(default=90),
-    resample: str = Form(default=""),
-    order: str = Form(default="012"),  # interleave phase; "012" = 36-exp replay
-    invert: str = Form(default="density"),  # "density" (log) or "linear"
     crop: float = Form(default=100.0),  # centre-crop %, 100 = full frame
 ):
+    # A 36-exposure roll, the C-41 inversion, and auto channel-order are fixed by
+    # design — only rotation and an optional centre-crop are user-tunable.
     if _state["processing"]:
         async def _busy():
             yield _sse({"type": "error", "message": "Already processing"})
@@ -269,14 +268,6 @@ async def api_process(
         return StreamingResponse(_no_file(), media_type="text/event-stream",
                                  headers=_SSE_HEADERS)
 
-    resample_size: tuple[int, int] | None = None
-    if resample:
-        try:
-            rw, rh = (int(v) for v in resample.lower().split("x"))
-            resample_size = (rw, rh)
-        except ValueError:
-            pass
-
     _state["frames"] = []
     _state["processing"] = True
 
@@ -290,9 +281,7 @@ async def api_process(
 
     def _run() -> None:
         try:
-            result = decode_raw(raw_path, n_frames=frames, rotate=rotate,
-                                resample=resample_size, base_order=order,
-                                invert_mode=invert, crop_pct=crop,
+            result = decode_raw(raw_path, rotate=rotate, crop_pct=crop,
                                 progress=_progress)
             _state["frames"] = result
             loop.call_soon_threadsafe(
@@ -408,6 +397,29 @@ async def api_export(fmt: str = "tiff"):
         media_type="application/zip",
         filename=f"pakon_frames_{fmt}.zip",
     )
+
+
+@app.get("/api/contact")
+async def api_contact():
+    """A single JPEG contact sheet of all rendered frames."""
+    frames = _state["frames"]
+    if not frames:
+        return JSONResponse({"error": "no frames"}, status_code=404)
+
+    out = WORK_DIR / "contact_sheet.jpg"
+
+    def _make() -> Path | None:
+        sheet = make_contact_sheet(frames)
+        if sheet is None:
+            return None
+        sheet.save(str(out), "JPEG", quality=90)
+        return out
+
+    result = await asyncio.get_event_loop().run_in_executor(None, _make)
+    if result is None:
+        return JSONResponse({"error": "no rendered frames"}, status_code=404)
+    return FileResponse(out, media_type="image/jpeg",
+                        filename="pakon_contact_sheet.jpg")
 
 
 # ── Clear / cleanup ─────────────────────────────────────────────────────────────
