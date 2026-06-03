@@ -25,15 +25,14 @@ if str(_TOOLS) not in sys.path:
 
 from pakon_image import (  # noqa: E402
     find_frame_grid,
-    find_ir_band,
     invert_c41,
+    marker_align,
     measure_dmin,
     measure_leads,
     register_zones,
     render_jpeg,
+    validated_leads,
     _c41_lut,
-    _FIXED_ZONE0_PERM,
-    _FIXED_ZONE1_PERM,
 )
 
 WORK_DIR = Path("/tmp/pakon_web")
@@ -47,8 +46,14 @@ _FRAME_W = 3000                # fixed crop width (long axis), capped at pitch
 
 
 def _build_ribbon(raw_path, emit):
-    """Deinterleave → fixed per-zone channel order → trilinear registration.
-    Returns the FULL assembled negative ribbon (rows=long axis, cols=width).
+    """Marker-align rows → deinterleave (R,G,B triplets at stride 3, IR trailing)
+    → trilinear registration. Returns the FULL assembled negative ribbon
+    (rows=long axis, cols=width).
+
+    Aligning to the per-scanline marker bit fixes the triplet phase regardless of
+    where the 0x86 capture started, so the colour cast is consistent across scans
+    (otherwise it flips purple/turquoise). IR is a single trailing line, so there
+    is one visible zone — no wrap-split.
 
     Autocrop is intentionally NOT applied: it kept only the single largest run
     of image rows, which silently dropped every frame past an interior dark
@@ -59,26 +64,17 @@ def _build_ribbon(raw_path, emit):
     lw = _LINEWIDTH
     lines = raw.size // lw
     img = raw[: lines * lw].reshape(lines, lw)
-    n3 = (lw // 3) * 3
-    chans = {"r": img[:, 1:n3:3], "g": img[:, 2:n3:3], "b": img[:, 0:n3:3]}
-    full = float(max(chans[c][::997].max() for c in ("r", "g", "b"))) or 1.0
-    width = chans["r"].shape[1]
 
-    emit("Finding IR band", 0.10)
-    ir = find_ir_band(chans, full)
-    if ir:
-        ir0, ir1 = ir
-        zones = [z for z in [(ir1 + 1, width), (0, ir0)] if z[1] > z[0]]
-    else:
-        zones = [(0, width)]
-    zone_perms = ([_FIXED_ZONE0_PERM, _FIXED_ZONE1_PERM] if len(zones) == 2
-                  else [_FIXED_ZONE0_PERM])
+    emit("Aligning rows", 0.10)
+    img, _ = marker_align(img)
+    width = lw // 4
+    nvis = width * 3
+    chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
 
     emit("Registering channels", 0.30)
-    leads = [measure_leads(chans, c0, c1, perm=zone_perms[i])
-             for i, (c0, c1) in enumerate(zones)]
-    rgb = register_zones(chans, zones, leads,
-                         correct_seam=len(zones) == 2, zone_perms=zone_perms)
+    leads, _ = validated_leads(measure_leads(chans, 0, width))
+    rgb = register_zones(chans, [(0, width)], [leads],
+                         correct_seam=False, zone_perms=[None])
     return rgb
 
 
