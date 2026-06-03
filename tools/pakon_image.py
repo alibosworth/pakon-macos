@@ -4,20 +4,28 @@ pakon_image.py — decode a Pakon raw scan stream into 16-bit RGB TIFF(s).
 
 The captured 0x86 image stream (pakon_replay --scan output) is, on this F-135:
   - 16-bit little-endian samples,
-  - per-pixel interleaved (column autocorrelation peaks at lag 3/6/9), in the
-    order **B, R, G** — i.e. samples run B,R,G,B,R,G,... NOT R,G,B. Green is
-    the middle trilinear line (position 2), red is position 1, blue position 0;
-    confirmed by natural skin tones across all 6 channel permutations of a real
-    frame (the wrong orders give green or "lomography purple" skin).
-  - `--linewidth` samples per scan line (default 8000 = 16000-byte stride),
-    giving width = linewidth//3 px (~2666); the last 0-2 samples are padding.
+  - each scan line is `--linewidth` samples (default 8000 = 16000-byte stride),
+    laid out as [ width visible triplets | width IR/extra samples ] where
+    width = linewidth//4 (= 2000). The first width*3 samples are the visible
+    image, per-pixel interleaved at stride 3 in the order **R, G, B** (pos0=R,
+    pos1=G, pos2=B — green is the centre trilinear line); the trailing width
+    samples are a single IR (Digital ICE) line, detected and discarded for the
+    visible output.
+
+  - the row/triplet phase is recovered per scan from the scanner's per-scanline
+    **marker bit** (the LSB of one fixed word, set on every line). The 0x86
+    stream is captured in 20480-byte chunks with an arbitrary start, so without
+    this the B/R/G samples rotate scan-to-scan and the colour cast flips (purple
+    vs turquoise — the old "lomo" inconsistency). Aligning to the marker pins the
+    canonical row origin and makes the decode phase-independent (mirrors
+    libpakon). `--no-marker-align` falls back to the raw byte-0 phase.
 
 The sensor is **trilinear** (separate R/G/B lines spaced along the scan
 direction), so the three channels are offset by a few scan lines and show
 colour ghosting at edges if naively combined. By default it **co-registers**
-them (auto-measured; lines are spaced ~8 apart, order B/G/R along the scan, so
-green and blue lead red by ~8 and ~15 lines on this F-135);
-`--no-register` disables it, `--reg-leads G,B` forces the offsets.
+them (auto-measured; the lines are spaced ~8 scan lines apart, so green leads
+red by ~8 and blue by ~16 on this F-135); `--no-register` disables it,
+`--reg-leads G,B` forces the offsets.
 
 By default it **autocrops** the ribbon: a real scan begins with a dark leader
 and often a blank stretch (light through no film, before the strip is loaded),
@@ -87,20 +95,27 @@ def _srgb_encode(x01):
                     (1.0 + a) * np.power(np.clip(x01, 0.0, 1.0), 1.0 / 2.4) - a)
 
 
-_G_OF_POS = {0: "b", 1: "r", 2: "g"}  # global chans label of each interleave pos
+_G_OF_POS = {0: "r", 1: "g", 2: "b"}  # chans label of each interleave position
 
-# Verified fixed per-zone channel identity (the standard 36-frame replay phase).
-# The R/G/B interleave positions are a fixed property of the CCD tap + replay
-# buffer phase — NOT per-scan — so this is hardcoded and is the default. Verified
-# against the OEM reference scans of two different rolls:
-#   zone0 (after-IR):  R=pos0, G=pos1, B=pos2
-#   zone1 (before-IR): R=pos1, G=pos2, B=pos0  (= identity vs the global chans)
-# Expressed as perms mapping output r/g/b -> the global `chans` key (b=pos0,
-# r=pos1, g=pos2). NOTE: orange-base auto-detection (detect_zone_perm) is
-# unreliable on dark/red-dominant rolls — the bright percentile catches scene
-# highlights, not clean film base, and flips G/B — so it is opt-in, not default.
-_FIXED_ZONE0_PERM = {"r": "b", "g": "r", "b": "g"}
-_FIXED_ZONE1_PERM = None  # identity
+
+def marker_align(img, min_frac=0.6, sample_rows=3000):
+    """Rotate every row so the scanner's per-scanline marker bit sits at column 0
+    — the canonical row origin (after libpakon's detect_f135_scanline_marker_origin).
+
+    The firmware sets the LSB (bit 0) of one fixed word on every scan line. Find
+    that word by counting, per column, how often bit 0 is set across rows; the
+    column that's set on (almost) every row is the marker. Rolling it to column 0
+    fixes the triplet/IR phase regardless of where the 0x86 capture began, so the
+    B/R/G channel identity no longer drifts between scans.
+
+    `img` is (rows, linewidth) uint16. Returns (aligned_img, marker_col), or
+    (img, None) if no column is reliably set (no marker → leave phase untouched)."""
+    sub = img[::max(1, img.shape[0] // sample_rows)]
+    frac = (sub & 1).mean(0)
+    cm = int(np.argmax(frac))
+    if frac[cm] < min_frac:
+        return img, None
+    return np.roll(img, -cm, axis=1), cm
 
 
 def _zone_band_bases(chans, c0, c1, sat, pct, nwin, winrows):
@@ -269,6 +284,26 @@ def measure_leads(chans, c0, c1, perm=None):
     return {"r": 0,
             "g": _vlead(ch["g"][:, c0:c1], ch["r"][:, c0:c1]),
             "b": _vlead(ch["b"][:, c0:c1], ch["r"][:, c0:c1])}
+
+
+# Trilinear CCD line spacing (scan lines) in the marker-aligned R,G,B frame:
+# green is read ~8 lines after red, blue ~16 (matches libpakon's fixed
+# red=0/green=8/blue=16; our co-registration sign makes them negative). The
+# spacing is a fixed sensor-geometry constant, so it's the default + the sanity
+# bound for the auto-measured leads — the cross-correlation returns 0 (or junk)
+# on a low-detail band, e.g. when a frame gap lands in the centre, which leaves
+# the channels unregistered and the frame ghosted (this happened on neg4).
+_TRILINEAR_LEADS = {"r": 0, "g": -8, "b": -16}
+
+
+def validated_leads(measured):
+    """Accept auto-measured trilinear leads only if they're physically plausible
+    (close to the fixed spacing); otherwise fall back to the constant. Returns
+    (leads, measured_ok)."""
+    g, b = measured["g"], measured["b"]
+    if -13 <= g <= -3 and -22 <= b <= -9:
+        return {"r": 0, "g": g, "b": b}, True
+    return dict(_TRILINEAR_LEADS), False
 
 
 def register_zones(chans, zones, leads_per_zone, correct_seam=False, zone_perms=None):
@@ -574,10 +609,16 @@ def main():
                     help="channel order of the interleave (default rgb)")
     ap.add_argument("--channel-order", default="fixed",
                     choices=["fixed", "auto", "brg"],
-                    help="per-zone R/G/B identity: 'fixed' (default) = the "
-                         "verified constant order; 'auto' = detect from the "
+                    help="R/G/B identity: 'fixed' (default) = R,G,B at "
+                         "interleave positions 0,1,2; 'auto' = detect from the "
                          "orange film base (unreliable on dark/red rolls); "
-                         "'brg' = old legacy order")
+                         "'brg' = old (wrong) B,R,G order, A/B comparison only")
+    ap.add_argument("--marker-align", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="align rows to the per-scanline marker bit so the B/R/G "
+                         "triplet phase is independent of the capture start "
+                         "(default on; fixes the inconsistent colour cast across "
+                         "scans). --no-marker-align uses the raw byte-0 phase")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     ap.add_argument("--frames", type=int, default=None,
                     help="split into N frames (default: auto-detect from valley count)")
@@ -659,72 +700,78 @@ def main():
     lines = raw.size // lw
     img = raw[:lines * lw].reshape(lines, lw)
 
-    n3 = (lw // 3) * 3
-    # Interleave order is B,R,G: position 0 = B, position 1 = R, position 2 = G
-    # (green is the middle trilinear line). Verified by skin-tone test across all
-    # 6 permutations of a real frame.
-    chans = {"r": img[:, 1:n3:3], "g": img[:, 2:n3:3], "b": img[:, 0:n3:3]}
+    # Align to the per-scanline marker bit BEFORE deinterleaving. The 0x86 image
+    # stream is captured in 20480-byte bulk chunks with an arbitrary start, so the
+    # row/triplet phase floats from scan to scan; without correcting it the B/R/G
+    # samples rotate and the colour cast flips between scans (purple on one scan,
+    # turquoise on another — the long-standing "lomo" inconsistency). The scanner
+    # marks every scan line by setting the LSB of one fixed word, so finding that
+    # word pins the true row origin and makes the phase scan-independent (mirrors
+    # libpakon's detect_f135_scanline_marker_origin). Verified phase-invariant by
+    # decoding the same scan from many simulated capture starts.
+    if args.marker_align:
+        img, marker_col = marker_align(img)
+        if marker_col is not None:
+            print(f"marker align: row origin at raw col {marker_col}")
+        else:
+            print("marker align: no reliable marker found; using raw phase "
+                  "(colour cast may vary)")
+
+    # Wire row layout (libpakon repack_shifted_rows): each marker-aligned row is
+    #   [ width per-pixel-interleaved R,G,B triplets | width IR/extra samples ]
+    # so the first width*3 = lw*3//4 samples are the visible image at stride 3
+    # (pos0=R, pos1=G, pos2=B; green is the centre trilinear line), and the
+    # trailing lw//4 samples are a SINGLE IR (Digital ICE) line — NOT a column
+    # band that splits the image. Hence one visible zone, no wrap-split. width =
+    # lw//4 (= 2000 for the F-135's 8000-sample row). [Supersedes the old B,R,G /
+    # 2666-px reading, which assumed phase-0 alignment and folded the IR line into
+    # the channels.]
+    width = lw // 4
+    nvis = width * 3
+    chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
+    ir = img[:, nvis:nvis + width]  # trailing IR line (detected + discarded)
     full = float(max(chans["r"][::997].max(), chans["g"][::997].max(),
                      chans["b"][::997].max())) or 1.0
-    width = chans["r"].shape[1]
 
-    # Locate the IR (Digital ICE) band and define the visible zones. A scan line
-    # is laid out [visible | IR]; a horizontal buffer offset can wrap the visible
-    # image around the line edge, dropping the IR band into the middle. The
-    # visible columns are then everything after the IR band, then everything
-    # before it (wrap order) — which rejoins the image at the true sensor seam.
-    ir = find_ir_band(chans, full)
-    if ir:
-        ir0, ir1 = ir
-        # Wrap order: columns after the IR band, then columns before it. Drop
-        # empty zones (when the IR band sits flush against a line edge, e.g. the
-        # 4-frame scan, one side is empty and there is nothing to wrap).
-        zones = [z for z in [(ir1 + 1, width), (0, ir0)] if z[1] > z[0]]
-        print(f"IR band: cols {ir0}-{ir1} (Digital ICE); visible zones "
-              f"{zones}")
-    else:
-        zones = [(0, width)]
-
-    # Channel identity per zone. The CCD output taps emit R/G/B in a
-    # zone-specific order, so the wrong order produces a colour cast (purple).
-    # The order is a FIXED hardware/replay-phase constant (verified on multiple
-    # rolls), so 'fixed' (default) hardcodes it. 'auto' = orange-base detection
-    # (unreliable on dark/red rolls — opt-in only). 'brg' = old legacy order.
+    # Single visible zone. Marker-aligned, the CCD emits R,G,B at fixed positions
+    # 0,1,2; 'fixed' (default) uses that identity. 'auto' = orange-base detection
+    # (opt-in, unreliable on dark/red rolls); 'brg' = a swapped order for A/B
+    # comparison only.
+    zones = [(0, width)]
     if args.channel_order == "auto":
-        zone_perms = []
-        for c0, c1 in zones:
-            perm, base = detect_zone_perm(chans, c0, c1)
-            ranked = sorted(base, key=lambda p: base[p], reverse=True)
-            print(f"channel-order: zone {c0}-{c1} pos-bases "
-                  f"{[int(base[p]) for p in (0, 1, 2)]} -> "
-                  f"R=pos{ranked[0]} G=pos{ranked[1]} B=pos{ranked[2]}")
-            zone_perms.append(perm)
+        perm, base = detect_zone_perm(chans, 0, width)
+        ranked = sorted(base, key=lambda p: base[p], reverse=True)
+        print(f"channel-order: pos-bases {[int(base[p]) for p in (0, 1, 2)]} -> "
+              f"R=pos{ranked[0]} G=pos{ranked[1]} B=pos{ranked[2]}")
+        zone_perms = [perm]
     elif args.channel_order == "brg":
-        zone_perms = [None, {"r": "g", "g": "b", "b": "r"}][:len(zones)] \
-            if len(zones) == 2 else [None]
-    else:  # "fixed" (default) — verified per-zone order
-        zone_perms = ([_FIXED_ZONE0_PERM, _FIXED_ZONE1_PERM] if len(zones) == 2
-                      else [_FIXED_ZONE0_PERM])
+        # Swapped order (B,R,G at pos0,1,2) — what you get without marker
+        # alignment; kept for A/B comparison only.
+        zone_perms = [{"r": "g", "g": "b", "b": "r"}]
+        print("channel-order: swapped B,R,G (comparison only)")
+    else:  # "fixed" (default) — marker-aligned pos0=R, pos1=G, pos2=B
+        zone_perms = [None]
 
     if args.register:
         if args.reg_leads:
             g, b = (int(v) for v in args.reg_leads.split(","))
-            leads_per_zone = [{"r": 0, "g": g, "b": b} for _ in zones]
+            leads = {"r": 0, "g": g, "b": b}
+            print(f"register: forced trilinear leads R=0 G={g} B={b}")
         else:
-            # Each visible zone gets its own leads, measured with the correct
-            # per-zone channel mapping so the cross-correlation sees real RGB.
-            leads_per_zone = [measure_leads(chans, c0, c1, perm=zone_perms[i])
-                              for i, (c0, c1) in enumerate(zones)]
-        for (c0, c1), leads in zip(zones, leads_per_zone):
-            print(f"register: zone {c0}-{c1} trilinear leads "
-                  f"R=0 G={leads['g']} B={leads['b']}")
+            measured = measure_leads(chans, 0, width, perm=zone_perms[0])
+            leads, ok = validated_leads(measured)
+            if ok:
+                print(f"register: trilinear leads R=0 G={leads['g']} B={leads['b']}")
+            else:
+                print(f"register: measured leads G={measured['g']} B={measured['b']}"
+                      f" implausible (low detail?); using fixed G={leads['g']} "
+                      f"B={leads['b']}")
+        leads_per_zone = [leads]
     else:
-        leads_per_zone = [{"r": 0, "g": 0, "b": 0} for _ in zones]
+        leads_per_zone = [{"r": 0, "g": 0, "b": 0}]
 
-    correct_seam = args.seam_correct and len(zones) == 2
-    rgb = register_zones(chans, zones, leads_per_zone,
-                         correct_seam=correct_seam,
-                         zone_perms=zone_perms)  # (lines, Wvis, 3)
+    rgb = register_zones(chans, zones, leads_per_zone, correct_seam=False,
+                         zone_perms=zone_perms)  # (lines, width, 3)
     order_idx = {"r": 0, "g": 1, "b": 2}
     perm = [order_idx[c] for c in args.order.lower()]
     if perm != [0, 1, 2]:
