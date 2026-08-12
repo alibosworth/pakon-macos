@@ -249,8 +249,16 @@ See `firmware/README.md` for provenance and the legal note. The `.pakfw` route
 
 ## License
 
-**TBD.** Likely GPL; the license will be chosen before any release. See
-`LICENSE`.
+GNU Affero General Public License, version 3 or later (`AGPL-3.0-or-later`).
+Full text in `LICENSE`; see `NOTICE` for copyright and third-party terms.
+
+AGPL was chosen because the web app is the product: §13 requires that anyone
+who runs a modified pakon as a network service offer its source to the users
+of that service, which plain GPL would not.
+
+The Intel HEX firmware blob under `firmware/` is a third-party
+device-bootstrapping artifact with its own separate terms and is **not**
+covered by this license — see `firmware/README.md`.
 
 ## Disclaimer
 

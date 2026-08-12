@@ -1,0 +1,39 @@
+pakon — clean-room driver and web app for the Kodak/Pakon F-X35 film scanner
+Copyright (C) 2025-2026 Jorge Rangel
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+
+Third-party components
+----------------------
+
+firmware/
+    The Intel HEX firmware blob is a third-party device-bootstrapping artifact
+    with its own separate terms. It is NOT covered by the AGPL and is not a
+    work of this project. See firmware/README.md for provenance and the legal
+    note.
+
+libusb-1.0
+    Linked at build time. LGPL-2.1-or-later. Not distributed as part of this
+    source tree.
+
+Python runtime dependencies (web/requirements.txt)
+    FastAPI, uvicorn, python-multipart, numpy, tifffile, Pillow, pyusb — each
+    under its own permissive license (MIT / BSD / HPND). Not distributed as
+    part of this source tree.
+
+Kodak and Pakon are trademarks of their respective owners. This project is
+reverse-engineered and unofficial, and is not affiliated with or endorsed by
+them.
