@@ -169,12 +169,14 @@ before PIC traffic flows.
      serial fields read the factory placeholder "12345".
    - **Film-exit caveat**: the OEM polls the film out of the transport at
      end of scan; open-loop replay blows through that wait, leaving the
-     strip partly in the feed. Fix used: replay the captured advance block
-     (`SetMotorCalibration` → `EngageFilmDrive 0xA0` → `SetMotorSpeed reg0`),
-     shell-sleep ~15 s while the film feeds clear, then the teardown stop
-     pattern (`0xA2` + reg9 speed writes). Scripts:
-     `scratch/eject_start.pakscan` / `eject_stop.pakscan` — worth promoting
-     into a proper `pakon_replay` poll-until-clear step.
+     strip partly in the feed. Now built in as `pakon_replay --advance`
+     (standalone or after `--scan`): probes the motor PIC, replays the
+     captured advance block (`SetMotorCalibration` → `EngageFilmDrive
+     0xA0` → `SetMotorSpeed reg0`), runs the transport for a fixed
+     `--advance-seconds` (default 15), then the captured stop pattern
+     (`0xA2` + reg9 speed writes). Time-based for now; a sensor-gated
+     stop needs the film-present byte in the `0x90` reply identified
+     first.
 
 ## Coverage matrix (what is verified where)
 

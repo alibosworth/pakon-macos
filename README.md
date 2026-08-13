@@ -76,10 +76,10 @@ Two file types drive the process:
 - **`.pakfw`** — a firmware replay script extracted from a USB capture of the
   Windows driver performing the firmware load. It contains the exact sequence
   of USB control transfers needed to bring the scanner from cold (`0F05:F235`)
-  to operational (`0F05:F135`). Generate it once from a capture with
-  `analyze_capture.py --extract-firmware`; reuse it every session. Not
-  committed here because it contains Kodak firmware bytes — see
-  `firmware/README.md`.
+  to operational (`0F05:F135`). One ships at `resources/f135.pakfw` (works
+  for the F-135 and F-135+ — same FX2 image); regenerate from your own
+  capture with `analyze_capture.py --extract-firmware` if redistribution is
+  a concern — see `firmware/README.md`.
 
 - **`.pakscan`** — an operation script extracted from a USB capture of the
   Windows driver. Two kinds:
@@ -226,10 +226,26 @@ python3 tools/pakon_image.py scan.raw --linewidth 6000 --no-ir-lane \
 Base 8 / Base 4 scripts are in `resources/f135plus/` too (decode with
 `--linewidth 4500` / `3000`); `base4_ir.pakscan` scans with the IR channel
 (decode with `--linewidth 4000`, keep the default `--ir-lane`). Insert the
-film strip at the feeder *before* starting the scan replay, and note the
-replay does not yet poll the film out at the end — see
-`docs/F135_PLUS_CAPTURES.md` for the eject sequence and everything else
-F-135+ (protocol differences, stream format, per-mode parameters).
+film strip at the feeder *before* starting the scan replay.
+
+The OEM polls the film out of the transport after a scan; verbatim replay
+cannot, so the strip can stop short of the exit. Append `--advance` to the
+scan command to push it out afterwards (a fixed transport run;
+`--advance-seconds` sets the duration, and a strip already at the exit
+needs only 1-2 s), or run it standalone any time a strip is left inside:
+
+```sh
+./build/pakon_replay --advance --advance-seconds 3
+```
+
+Ctrl-C during a scan is safe: the first one stops the scan and replays the
+captured teardown (motor and acquisition off) before exiting.
+
+Frame-positioned advancing also works
+(`pakon_replay resources/f135plus/advance.pakscan`); both it and
+`--advance` probe the motor controller so the same commands work on either
+model. Everything else F-135+ (protocol differences, stream format,
+per-mode parameters) is in `docs/F135_PLUS_CAPTURES.md`.
 
 ### Debug logging
 
