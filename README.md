@@ -8,7 +8,8 @@ interoperability (see `docs/PROTOCOL.md` → PROVENANCE).
 
 > **Status:** Full end-to-end scan works on hardware — firmware load, open
 > handshake, film advance, scan drive, and image decode are all validated on
-> Linux and macOS. The product is a Python web service (FastAPI + browser UI)
+> Linux and macOS, on both the **F-135** and the **F-135+** (the Plus uses
+> its own scripts — see "F-135+ owners" under Usage). The product is a Python web service (FastAPI + browser UI)
 > that wraps the C tools and image pipeline so any machine on the local network
 > can drive the scanner.
 >
@@ -198,6 +199,37 @@ Key decoder options:
 | `--register` / `--no-register` | on | co-register the trilinear R/G/B sensor lines |
 | `--autocrop` / `--no-autocrop` | on | strip leader / blank pre-load scan / gate margin |
 | `-o PREFIX` | `frame` | output filename prefix |
+
+### F-135+ owners
+
+The F-135+ works end-to-end (verified on real hardware, 2026-08-12) but uses
+its own scripts and decoder flags — the F-135 `.pakscan` files above will NAK
+on it, because its controllers answer at different bus addresses. The
+differences:
+
+```sh
+# Firmware load is IDENTICAL (the F-135+ uses the same FX2 image):
+./build/pakon_probe --load-firmware resources/f135.pakfw
+
+# The open handshake detects your model:
+./build/pakon_replay --open       # prints "model detected: F-135+"
+
+# Scan with the F-135+ scripts (Base 16, highest quality):
+./build/pakon_replay --scan resources/f135plus/base16.pakscan --image scan.raw
+
+# Decode: F-135+ rows have no trailing IR block when IR is off, and the
+# row stride follows the resolution (Base 16 = 2000 px = 6000 samples):
+python3 tools/pakon_image.py scan.raw --linewidth 6000 --no-ir-lane \
+    --invert-c41 --jpeg
+```
+
+Base 8 / Base 4 scripts are in `resources/f135plus/` too (decode with
+`--linewidth 4500` / `3000`); `base4_ir.pakscan` scans with the IR channel
+(decode with `--linewidth 4000`, keep the default `--ir-lane`). Insert the
+film strip at the feeder *before* starting the scan replay, and note the
+replay does not yet poll the film out at the end — see
+`docs/F135_PLUS_CAPTURES.md` for the eject sequence and everything else
+F-135+ (protocol differences, stream format, per-mode parameters).
 
 ### Debug logging
 
