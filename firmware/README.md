@@ -25,9 +25,9 @@ control-transfer sequence from a capture and replay it:
 
 ```sh
 # from a capture that includes the f235->f135 load (e.g. a scan capture):
-python3 tools/analyze_capture.py CAPTURE.pcapng --extract-firmware f135.pakfw
+python3 tools/analyze_capture.py CAPTURE.pcapng --extract-firmware resources/f135.pakfw
 # then, with the cold 0F05:F235 device attached to the host (not a VM):
-sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
 ```
 
 `pakon_usb_load_firmware()` opens the cold `0F05:F235` device, replays each

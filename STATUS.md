@@ -630,14 +630,14 @@ raw negatives (orange mask intact). Feed to Negative Lab Pro / negadoctor.
 cold=`0F05:F235`/warm=`0F05:F135`; `analyze_capture.py --extract-firmware
 f135.pakfw` extracts the captured FX2 sequence; `pakon_usb_load_firmware`
 replays it and waits for re-enumeration. Confirmed working on the box:
-`--load-firmware f135.pakfw` brought f235→f135, then `--open` reached Idle.
+`--load-firmware resources/f135.pakfw` brought f235→f135, then `--open` reached Idle.
 (`.pakfw` gitignored — regenerate from a capture. Free the device from the VM
 first: shut down the VM / drop the 0f05 USB filter, replug, `lsusb`→0f05:f235.)
 
 To repeat the working test:
 ```sh
 python3 tools/analyze_capture.py /tmp/pakon_scan.pcapng --extract-firmware f135.pakfw
-sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
 sudo ./build/pakon_probe            # warm f135 + endpoints 0x01/0x81/0x86
 sudo ./build/pakon_replay --open    # reaches Idle
 ```
@@ -725,7 +725,7 @@ python3 tools/analyze_capture.py <cap.pcapng> --bus 1 --device N --commands
 
 # on the scanner box (Linux needs sudo; macOS does not)
 sudo ./build/pakon_probe                         # classify + endpoint map
-sudo ./build/pakon_probe --load-firmware f135.pakfw   # cold f235 → warm f135
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw   # cold f235 → warm f135
 sudo ./build/pakon_replay --open                 # open handshake to Idle
 sudo ./build/pakon_replay --scan scan.pakscan --image scan.raw  # full scan
 ./build/pakon_replay advance.pakscan --steps N   # advance N frames

@@ -156,7 +156,7 @@ propagates to test binaries with correct search dirs.
   `PAKON_COLD_*`/`PAKON_WARM_*` and `pakon_is_warm_id` (f135 only). Approach:
   extract the captured FX2 control-transfer sequence to a `.pakfw` script
   (`analyze_capture.py --extract-firmware`) and replay it verbatim
-  (`pakon_usb_load_firmware` → `pakon_probe --load-firmware f135.pakfw`), then
+  (`pakon_usb_load_firmware` → `pakon_probe --load-firmware resources/f135.pakfw`), then
   wait for re-enumeration. `.pakfw` holds Kodak bytes → gitignored, regenerate
   from a capture.
 - **Testing caveat:** the cold device must be on the HOST, not held by the VM

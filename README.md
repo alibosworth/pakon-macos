@@ -105,10 +105,10 @@ the device is already warm (`0f05:f135`) from a previous session, skip step 2.
 
 ```sh
 # Linux (needs privileges for libusb)
-sudo ./build/pakon_probe --load-firmware f135.pakfw
+sudo ./build/pakon_probe --load-firmware resources/f135.pakfw
 
 # macOS (no sudo needed)
-./build/pakon_probe --load-firmware f135.pakfw
+./build/pakon_probe --load-firmware resources/f135.pakfw
 ```
 
 The scanner re-enumerates as `0f05:f135`. Confirm with `--list`.
