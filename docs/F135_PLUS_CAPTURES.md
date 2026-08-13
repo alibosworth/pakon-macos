@@ -183,8 +183,8 @@ before PIC traffic flows.
 | Mode | Script converts | Captured stream decodes | Live replay on hardware |
 |---|---|---|---|
 | Base 16, no IR | yes | yes (2000×3000, verified visually) | **yes — full scan** |
-| Base 8, no IR | yes | yes (1500 wide; framing heuristics misjudge pitch) | not yet |
-| Base 4, no IR | yes | yes (1000 wide) | not yet |
+| Base 8, no IR | yes | yes (1500 wide; framing heuristics misjudge pitch) | **yes — full scan** (2026-08-13) |
+| Base 4, no IR | yes | yes (1000 wide) | POOR REPLAY CANDIDATE — the capture is an 18-min session with long waits; replay races through them (motor runs while image reads time out). Use base16/base8. |
 | Base 4, IR | yes | yes (`--linewidth 4000`, IR lane split correctly) | not yet |
 
 The other modes' live replays should behave like Base 16 (same protocol,
