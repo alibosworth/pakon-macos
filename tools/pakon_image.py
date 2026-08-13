@@ -605,6 +605,12 @@ def main():
     ap.add_argument("raw")
     ap.add_argument("--linewidth", type=int, default=8000,
                     help="samples per scan line (default 8000)")
+    ap.add_argument("--ir-lane", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="row carries a trailing IR/extra block, so width = "
+                         "linewidth/4 (F-135 8000-sample rows; F-135+ scans "
+                         "with IR on). --no-ir-lane for IR-off F-135+ streams "
+                         "where the row is pure RGB and width = linewidth/3.")
     ap.add_argument("--order", default="rgb",
                     help="channel order of the interleave (default rgb)")
     ap.add_argument("--channel-order", default="fixed",
@@ -726,10 +732,13 @@ def main():
     # lw//4 (= 2000 for the F-135's 8000-sample row). [Supersedes the old B,R,G /
     # 2666-px reading, which assumed phase-0 alignment and folded the IR line into
     # the channels.]
-    width = lw // 4
+    # F-135+ IR-off streams have no trailing IR block: the row is width*3 pure
+    # RGB samples (see docs/F135_PLUS_CAPTURES.md), so width = lw//3 there.
+    width = lw // 4 if args.ir_lane else lw // 3
     nvis = width * 3
     chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
-    ir = img[:, nvis:nvis + width]  # trailing IR line (detected + discarded)
+    # trailing IR line (detected + discarded) — absent without an IR lane
+    ir = img[:, nvis:nvis + width] if args.ir_lane else None
     full = float(max(chans["r"][::997].max(), chans["g"][::997].max(),
                      chans["b"][::997].max())) or 1.0
 
