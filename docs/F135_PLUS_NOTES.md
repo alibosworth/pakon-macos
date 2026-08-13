@@ -4,9 +4,11 @@
 > full Base 16 scan replay all succeeded on real hardware using its own
 > converted capture scripts (`docs/F135_PLUS_CAPTURES.md`). This document
 > remains the analysis of why the *original F-135 verbatim-replay path*
-> fails on a Plus; that failure mode is unchanged and the fixes proposed in
-> §6 (model detection, address-parameterised sequences) are still the right
-> way to unify the two models in one driven client.
+> fails on a Plus. Of the fixes proposed in §6, model detection is DONE
+> (2026-08-13: `pakon_replay --open` evaluates the PIC probes and reports
+> the model instead of byte-verifying one F-135's replies); the
+> address-parameterised sequences remain the right way to unify the two
+> models in one driven client.
 
 _Written 2026-08-12. Sources: this repo's code and `docs/PROTOCOL.md`; Ali
 Bosworth's independent RE corpus at `~/projects/Pakon Software/` (F-135+

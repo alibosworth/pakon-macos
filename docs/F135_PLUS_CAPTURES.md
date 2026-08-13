@@ -144,6 +144,11 @@ libusb, no Windows anywhere:
      marker/status byte precedes the payload.
    - `03 01 40` status poll returns `03 02 40 80` — `0x80` = host event
      pending (matches libpakon's F-135 semantics).
+   - `HostReset (0x85)` / `HostSetMode (0x8f)` reply **only on the first
+     open after power-on or firmware load**; later opens get reply timeouts
+     while the bridge keeps working. Matches the OEM firing HostReset in
+     clusters of three without depending on replies; treat those replies as
+     best-effort.
    - PPB_MINFO 12-byte module info: PICL+ `88 0f 0a 05 00 00 "12345"`,
      PICM+ `08 10 06 05 00 00 "12345"` (version words + placeholder serial).
    - 30-byte sensor read returns idle values with no film inserted.

@@ -30,13 +30,23 @@ typedef struct {
     size_t  expect_len;
 } open_step;
 
-/* From the device-13 scan capture (see docs/PROTOCOL.md). */
+/* From the device-13 scan capture (see docs/PROTOCOL.md). The HOST steps are
+ * byte-verified (identical on every model). The PIC probes that followed in
+ * the capture are NOT fixed expectations: they are the OEM's model detection
+ * (status 0 = that PIC acked/present, 1 = absent), and an F-135+ answers
+ * them exactly inverted vs an F-135 — confirmed on real hardware 2026-08-12
+ * (docs/F135_PLUS_CAPTURES.md). So the probes are evaluated, not compared. */
 static const open_step OPEN_SEQ[] = {
     {"open",            {0x04,0x03,0x10,0x00,0x85}, 5, {0x07,0x02,0x10,0x00}, 4},
     {"open-2",          {0x02,0x04,0x10,0x01,0x8f,0x00}, 6, {0x07,0x02,0x10,0x00}, 4},
-    {"probe PICM_PLUS", {0x04,0x03,0x44,0x00,0x00}, 5, {0x07,0x02,0x44,0x01}, 4},
-    {"probe BOOT_PICM_PLUS", {0x04,0x03,0x46,0x00,0x00}, 5, {0x07,0x02,0x46,0x01}, 4},
-    {"probe PICM",      {0x04,0x03,0x24,0x00,0x00}, 5, {0x07,0x02,0x24,0x00}, 4},
+};
+
+/* Presence probes, same frames the OEM sends after the open: CMD 0x00 to each
+ * candidate PIC address. Reply is 07 02 <addr> <status>. */
+static const struct { const char *label; uint8_t addr; } PIC_PROBES[] = {
+    {"PICM_PLUS (0x44)",      0x44},
+    {"BOOT_PICM_PLUS (0x46)", 0x46},
+    {"PICM (0x24)",           0x24},
 };
 
 static void hex(const char *tag, const uint8_t *b, size_t n)
@@ -87,6 +97,16 @@ static int do_open(unsigned timeout)
         r = pakon_cmd(dev, &cmd, &reply, timeout);
         printf("[%-20s] ", s->label);
         hex("send", s->out, s->out_len);
+        if (r == PAKON_ERR_TIMEOUT) {
+            /* HostReset/HostSetMode reply only on the FIRST open after
+             * power-on or firmware load; later opens get no reply while the
+             * bridge keeps working (observed on F-135+ hardware). The OEM
+             * fires HostReset in clusters of three and ignores the replies,
+             * so a missing reply here is not a failure — the PIC probes
+             * below are the real health check. */
+            printf("  -> no reply (normal after first open)\n");
+            continue;
+        }
         if (r != PAKON_OK) {
             printf("  -> ERROR %s\n", pakon_result_str(r));
             failures++;
@@ -105,12 +125,62 @@ static int do_open(unsigned timeout)
         }
     }
 
+    /* Model detection: -1 = probe errored, else the reply status byte
+     * (0 = present/acked, 1 = absent). */
+    int probe_status[sizeof(PIC_PROBES) / sizeof(PIC_PROBES[0])];
+    size_t nprobes = sizeof(PIC_PROBES) / sizeof(PIC_PROBES[0]);
+    for (size_t i = 0; i < nprobes; i++) {
+        uint8_t out[5] = {0x04, 0x03, PIC_PROBES[i].addr, 0x00, 0x00};
+        pakon_packet cmd, reply;
+        pakon_packet_build(&cmd, out[0], out + 2, out[1]);
+        probe_status[i] = -1;
+
+        r = pakon_cmd(dev, &cmd, &reply, timeout);
+        printf("[probe %-14s] ", PIC_PROBES[i].label);
+        hex("send", out, sizeof(out));
+        if (r != PAKON_OK) {
+            printf("  -> ERROR %s\n", pakon_result_str(r));
+            failures++;
+            continue;
+        }
+        uint8_t got[PAKON_PACKET_SIZE];
+        size_t glen = 0;
+        pakon_packet_serialize(&reply, got, sizeof(got), &glen);
+        hex("  recv", got, glen);
+        if (glen >= 4 && got[2] == PIC_PROBES[i].addr) {
+            probe_status[i] = got[3];
+            printf("  %s\n", got[3] == 0 ? "present" : "absent");
+        } else {
+            printf("  UNEXPECTED REPLY\n");
+            failures++;
+        }
+    }
+
     pakon_usb_release(dev);
     pakon_usb_close(dev);
     pakon_usb_exit(ctx);
 
-    printf("\nopen handshake: %s (%d/%zu steps mismatched)\n",
-           failures ? "INCOMPLETE" : "reached Idle", failures, n);
+    /* PIC_PROBES order: [0]=PICM_PLUS 0x44, [1]=BOOT_PICM_PLUS 0x46,
+     * [2]=PICM 0x24. Exactly one of the motor PICs answers per model. */
+    const char *model = NULL;
+    if (probe_status[0] == 0 && probe_status[2] != 0)
+        model = "F-135+ (Plus PICs at 0x40/0x44)";
+    else if (probe_status[2] == 0 && probe_status[0] != 0)
+        model = "F-135 (PICs at 0x20/0x24)";
+    if (probe_status[1] == 0)
+        printf("\nWARNING: PICM boot PIC (0x46) answered — device in "
+               "firmware-update state?\n");
+
+    if (model)
+        printf("\nmodel detected: %s\n", model);
+    else {
+        printf("\nmodel detection FAILED (0x44 status %d, 0x24 status %d)\n",
+               probe_status[0], probe_status[2]);
+        failures++;
+    }
+
+    printf("open handshake: %s\n",
+           failures ? "INCOMPLETE" : "reached Idle");
     return failures ? 1 : 0;
 }
 

@@ -220,11 +220,10 @@ propagates to test binaries with correct search dirs.
   converted capture scripts, not the F-135 ones. Full analysis in
   `docs/F135_PLUS_NOTES.md`, working results in `docs/F135_PLUS_CAPTURES.md`.
   The F-135 sequences themselves still NAK on a Plus: its PICs answer at the
-  `_PLUS` addresses `0x40`/`0x44` (not `0x20`/`0x24`), and
-  `pakon_replay --open`'s hardcoded probe expectations are exactly inverted
-  there (confirmed live). The open-handshake PIC probes are really the OEM's
-  *model detection* — a driven client should branch on them, not verify
-  them. Command opcodes are largely shared; Plus adds TEC-cooler init,
+  `_PLUS` addresses `0x40`/`0x44` (not `0x20`/`0x24`). `pakon_replay --open`
+  now treats the PIC probes as the model detection they are (status 0 =
+  present) and reports "F-135" or "F-135+" instead of byte-verifying one
+  F-135's replies — verified live on both models. Command opcodes are largely shared; Plus adds TEC-cooler init,
   per-channel exposure writes, and a DX sensor. Ali Bosworth (who owns this machine) has an
   F-135+ (serial 16402) plus an extensive OEM RE corpus at
   `~/projects/Pakon Software/` (see `notes/`), including driver-level Plus
