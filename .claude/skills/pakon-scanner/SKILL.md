@@ -214,7 +214,7 @@ propagates to test binaries with correct search dirs.
     in position) → `04 03 24 00 a2` (finalize/stop).
   - Duration parameter bytes `[a5 1c 25]` encode seconds (TLX UI input); exact
     binary encoding TBD from captures at known durations.
-  - `pakon_replay advance.pakscan [--steps N] [--limit SEC]` drives N frame
+  - `pakon_replay resources/advance.pakscan [--steps N] [--limit SEC]` drives N frame
     advances. Each step = `a0` → HOST poll loop → `a2`. `--steps` defaults to 1.
 - **F-135+ ("Plus") WORKS with this client as of 2026-08-12** — via its own
   converted capture scripts, not the F-135 ones. Full analysis in

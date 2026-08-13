@@ -86,7 +86,7 @@ Two file types drive the process:
     image reads. `pakon_replay --scan` replays it verbatim to drive a real
     scan. Generate with `analyze_capture.py --extract-scan`.
   - **Advance script** — motor command sequence for film transport.
-    `pakon_replay advance.pakscan` replays it and then loops the
+    `pakon_replay resources/advance.pakscan` replays it and then loops the
     start/poll/finalize sequence for as many frames as needed. Generate by
     capturing an advance operation and extracting with `analyze_capture.py`.
 
@@ -126,8 +126,8 @@ Should print `OK` for each step and reach `Idle`.
 To transport film to the desired position (e.g. to the first frame):
 
 ```sh
-./build/pakon_replay advance.pakscan            # advance 1 frame
-./build/pakon_replay advance.pakscan --steps N  # advance N frames
+./build/pakon_replay resources/advance.pakscan            # advance 1 frame
+./build/pakon_replay resources/advance.pakscan --steps N  # advance N frames
 ```
 
 Each step sends the start command, polls until the scanner signals the frame
@@ -142,7 +142,7 @@ TLX software in seconds) and is carried verbatim in the `.pakscan` script — se
 Load film into the scanner, then:
 
 ```sh
-./build/pakon_replay --scan scan.pakscan --image scan.raw
+./build/pakon_replay --scan resources/scan.pakscan --image scan.raw
 ```
 
 Streams ~240 MB per 4-frame strip, or ~1.2 GB for a whole roll. A couple of
