@@ -1,8 +1,16 @@
-# Why the F-135+ doesn't work with this client — speculation + evidence
+# Why the F-135+ didn't work with this client — analysis (now resolved)
 
-_Written 2026-08-12. Sources: this repo's code and `docs/PROTOCOL.md`; the
-owner's independent RE corpus at `~/projects/Pakon Software/` (F-135+ serial
-16402): `notes/usb-protocol.md` (742 MB PPB debug trace), `notes/firmware-files.md`,
+> **STATUS 2026-08-12: the F-135+ now works** — firmware load, init, and a
+> full Base 16 scan replay all succeeded on real hardware using its own
+> converted capture scripts (`docs/F135_PLUS_CAPTURES.md`). This document
+> remains the analysis of why the *original F-135 verbatim-replay path*
+> fails on a Plus; that failure mode is unchanged and the fixes proposed in
+> §6 (model detection, address-parameterised sequences) are still the right
+> way to unify the two models in one driven client.
+
+_Written 2026-08-12. Sources: this repo's code and `docs/PROTOCOL.md`; Ali
+Bosworth's independent RE corpus at `~/projects/Pakon Software/` (F-135+
+serial 16402): `notes/usb-protocol.md` (742 MB PPB debug trace), `notes/firmware-files.md`,
 `notes/usb-driver-details.md`, `notes/picl-plus-firmware-NL050A.md`,
 `notes/ioctl-capture-analysis.md`, and the **driver-level captures in
 `Pakon datalogger capture/`**. Markers follow the notes'
@@ -20,7 +28,7 @@ configure. The very first thing `pakon_replay --open` does on a Plus is verify
 probe replies that are **exactly inverted** on that model, so it fails at the
 open handshake before anything else gets a chance.
 
-Crucially, **the owner already has real F-135+ captures** (TX side + full EP6
+Crucially, **Ali Bosworth already has real F-135+ captures** (TX side + full EP6
 image stream, four resolution/IR configurations) — see §5. The main remaining
 gap is the RX direction (device replies).
 
@@ -53,7 +61,7 @@ inversion follows directly from the address table.]
 [CONFIRMED] All `.pakscan` scripts (scan, advance) were extracted from F-135
 captures, so every configure/calibrate/motor/scan command addresses
 `AD_PICL 0x20` / `AD_PICM 0x24`. The F-135+ PICs sit at `AD_PICL_PLUS 0x40` /
-`AD_PICM_PLUS 0x44` — this is now **hard-confirmed** by the owner's IOCTL
+`AD_PICM_PLUS 0x44` — this is now **hard-confirmed** by Ali Bosworth's IOCTL
 captures, where the only addresses ever used are `0x10` (HOST), `0x40`
 (PICL+), `0x44` (PICM+) (`ioctl-capture-analysis.md`). On a Plus, frames sent
 to 0x20/0x24 should come back status 1 (not acked); only the `AD_HOST 0x10`
@@ -61,11 +69,11 @@ to 0x20/0x24 should come back status 1 (not acked); only the `AD_HOST 0x10`
 
 ## 3. Good news: the command dialect is mostly shared
 
-Cross-referencing this repo's F-135 wire capture against the owner's F-135+
+Cross-referencing this repo's F-135 wire capture against Ali Bosworth's F-135+
 traces, the opcodes line up [CONFIRMED on the F-135+ side from the IOCTL
 captures; the pairing to F-135 wire bytes is INFERRED]:
 
-| Command | F-135 capture (this repo) | F-135+ (owner's captures) |
+| Command | F-135 capture (this repo) | F-135+ (Ali Bosworth's captures) |
 |---|---|---|
 | Acquire line `0x8A` | `04 03 20 00 8a` to PICL 0x20 | PICL+ CMD 0x8A |
 | Light config `0x8F` | `02 07 20 04 8f …` (4-byte write) | PICL+ WRITE 0x8F `[E8 FF 18 00]` |
@@ -75,7 +83,7 @@ captures; the pairing to F-135 wire bytes is INFERRED]:
 | End acquisition `0x92` | `92` stop (PROTOCOL.md teardown) | PICL+ CMD 0x92 |
 
 The wire format `[type][count][addr][payload_len][cmd][payload…]` also maps
-1:1 onto the IOCTL record format the owner decoded
+1:1 onto the IOCTL record format Ali Bosworth decoded
 (`[rx_len][tx_len][addr][data_count][cmd][data]`, with op type implicit:
 tx_len==3 & count==0 → CMD/type 04, tx_len==3+N → WRITE/type 02, etc.). And
 the fixed 60-pair vendor-request init in the F-135+ captures (32-byte chunk
@@ -85,7 +93,7 @@ shared across models. **Re-addressing to 0x40/0x44 gets you most of the way.**
 
 ## 4. What re-addressing alone will NOT cover — now with real values
 
-The owner's captures show the F-135+ cold-start sequence is byte-identical
+Ali Bosworth's captures show the F-135+ cold-start sequence is byte-identical
 across sessions (commands 1–37), including Plus-specific steps an F-135
 capture never contains [CONFIRMED]:
 
@@ -123,7 +131,7 @@ actual warm VID/PID/bcdDevice haven't been observed.
 
 `~/projects/Pakon Software/Pakon datalogger capture/` holds four TLXCD
 sessions of the **same 4-exposure strip** on the F-135+ (serial 16402), at
-Base 4/8/16 and Base 4 + IR, captured with the owner's modified FX35 kernel
+Base 4/8/16 and Base 4 + IR, captured with Ali Bosworth's modified FX35 kernel
 driver ("KK driver" with EP6 + IOCTL logging). Each session:
 `ep6_001.bin` (calibration pass) + `ep6_002.bin` (film pass) + `ioctl_log.bin`.
 See `CAPTURE_CONDITIONS.md` there and `notes/ioctl-capture-analysis.md`.

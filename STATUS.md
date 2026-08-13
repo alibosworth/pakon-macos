@@ -4,6 +4,23 @@ Living protocol notes are in `docs/PROTOCOL.md`; imaging details in
 `docs/IMAGING.md`; the project skill `.claude/skills/pakon-scanner/SKILL.md` has
 the operational guide. This file is the short "where we left off" snapshot.
 
+_Update 2026-08-12 (F-135+ session, on Ali Bosworth's F-135+ serial 16402): the
+**F-135+ now scans end-to-end on macOS**. Path: convert Ali Bosworth's Windows
+driver-level captures with `tools/fx35_datalogger.py` → `resources/f135plus/
+*.pakscan` → `pakon_probe --load-firmware resources/f135.pakfw` (Pakon7.hex
+is shared across the F135 family, personality `F235_AA07`; verified
+byte-identical) → `pakon_replay --scan resources/f135plus/base16.pakscan`
+pulled a full 210 MB strip → `pakon_image.py --linewidth 6000 --no-ir-lane
+--invert-c41 --jpeg` gave correct 2000×3000 positives. Plus protocol facts
+(addresses 0x40/0x44, inverted presence probes, per-mode row strides) in
+`docs/F135_PLUS_CAPTURES.md` + `docs/F135_PLUS_NOTES.md`. OPEN: live replay
+verified for Base 16 no-IR only (other modes' scripts convert and their
+captured streams decode, but haven't been replayed on hardware); framing
+heuristics (`find_frame_grid` pitch bounds, fixed-3000 crop) are tuned for
+Base 16 and misframe Base 8/4; open-loop replay skips the OEM's film-exit
+polling (eject workaround in F135_PLUS_CAPTURES §6); no scripts exist for
+uncaptured modes (e.g. Base 16 + IR) until a driven backend composes them._
+
 _Last updated: 2026-06-01 (imaging + web session). DONE: recovered the OEM C-41
 inversion (ColNeg log LUT `out=3500*log10(16383/in)` + per-channel Dmin
 normalisation; NOT the SCP stage) and the vibrant JPEG render (Kodak `rpd.pf` ICC

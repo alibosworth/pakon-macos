@@ -216,14 +216,16 @@ propagates to test binaries with correct search dirs.
     binary encoding TBD from captures at known durations.
   - `pakon_replay advance.pakscan [--steps N] [--limit SEC]` drives N frame
     advances. Each step = `a0` → HOST poll loop → `a2`. `--steps` defaults to 1.
-- **F-135+ ("Plus") does NOT work with this client — analysed 2026-08-12; full
-  writeup in `docs/F135_PLUS_NOTES.md`.** Its PICs answer at the `_PLUS`
-  addresses `0x40`/`0x44` (not `0x20`/`0x24`), so every captured F-135
-  sequence NAKs, and `pakon_replay --open`'s hardcoded probe expectations are
-  exactly inverted on a Plus. The open-handshake PIC probes are really the
-  OEM's *model detection* — a driven client should branch on them, not verify
+- **F-135+ ("Plus") WORKS with this client as of 2026-08-12** — via its own
+  converted capture scripts, not the F-135 ones. Full analysis in
+  `docs/F135_PLUS_NOTES.md`, working results in `docs/F135_PLUS_CAPTURES.md`.
+  The F-135 sequences themselves still NAK on a Plus: its PICs answer at the
+  `_PLUS` addresses `0x40`/`0x44` (not `0x20`/`0x24`), and
+  `pakon_replay --open`'s hardcoded probe expectations are exactly inverted
+  there (confirmed live). The open-handshake PIC probes are really the OEM's
+  *model detection* — a driven client should branch on them, not verify
   them. Command opcodes are largely shared; Plus adds TEC-cooler init,
-  per-channel exposure writes, and a DX sensor. The current owner (Ali) has an
+  per-channel exposure writes, and a DX sensor. Ali Bosworth (who owns this machine) has an
   F-135+ (serial 16402) plus an extensive OEM RE corpus at
   `~/projects/Pakon Software/` (see `notes/`), including driver-level Plus
   captures — TX commands + full EP6 image stream, 4 resolutions/IR modes — in

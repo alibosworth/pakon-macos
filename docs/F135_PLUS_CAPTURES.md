@@ -34,8 +34,8 @@ replies without byte-verifying them.
 - **The IOCTL payload is the wire frame.** The KK driver's
   `Ezusb_Read_Write_Direct` writes `IOCTL_PAKON_SEND_AND_RECEIVE_PACKET`
   input buffers verbatim to the bulk command pipe. So the logged payloads are
-  exactly our `[type][count][addr][payload_len][cmd][data…]` frames — the
-  owner's `ioctl-capture-analysis.md` header reading `[rx_len][tx_len]` is
+  exactly our `[type][count][addr][payload_len][cmd][data…]` frames — Ali
+  Bosworth's `ioctl-capture-analysis.md` header reading `[rx_len][tx_len]` is
   really `[type][count]` (type 04=CMD, 02=WRITE, 01=READ, 03=READ_STATUS).
 - **Addresses**: only `0x10` (HOST), `0x40` (PICL+), `0x44` (PICM+) appear.
 - **The FX2 bridge layer is identical to the F-135.** The 60-pair vendor
@@ -44,7 +44,7 @@ replies without byte-verifying them.
   `docs/PROTOCOL.md`, same 32-byte chunks, same offsets.
 - **The image stream arrives in 20480-byte bulk chunks** — every EP6 packet
   in all 8 stream files, matching the F-135's `0x86` read size exactly.
-- The init/config/scan sequence matches the owner's `usb-protocol.md` model:
+- The init/config/scan sequence matches Ali Bosworth's `usb-protocol.md` model:
   per-channel exposure writes, TEC setup, iterative
   `SetCcdGainOffset`/`SetColorMatrix` calibration loop before each scan,
   `HostReady(0x84)`→`AcquireLine(0x8A)` pairs, `EngageFilmDrive(0xA0)` …
@@ -54,7 +54,7 @@ replies without byte-verifying them.
 
 Film-phase rows are **per-pixel interleaved R,G,B** (lag-3 autocorrelation
 0.99), with the IR lane as a **trailing per-row block only when IR is on** —
-exactly the layout the owner's TLA.dll decompile describes
+exactly the layout Ali Bosworth's TLA.dll decompile describes
 (`usb-scan-data-decoding.md`: stream = `R[0],G[0],B[0],R[1]…`, IR "not
 interleaved, separate location").
 
@@ -113,7 +113,7 @@ Varying by mode:
 
 ## Live replay on real hardware (2026-08-12) — IT WORKS
 
-Ran against the owner's F-135+ (serial 16402) plugged into the Mac, macOS
+Ran against Ali Bosworth's F-135+ (serial 16402) plugged into the Mac, macOS
 libusb, no Windows anywhere:
 
 1. **Cold enumeration**: `0f05:f235` — same "unloaded family" bootstrap ID as
@@ -170,6 +170,23 @@ before PIC traffic flows.
      pattern (`0xA2` + reg9 speed writes). Scripts:
      `scratch/eject_start.pakscan` / `eject_stop.pakscan` — worth promoting
      into a proper `pakon_replay` poll-until-clear step.
+
+## Coverage matrix (what is verified where)
+
+| Mode | Script converts | Captured stream decodes | Live replay on hardware |
+|---|---|---|---|
+| Base 16, no IR | yes | yes (2000×3000, verified visually) | **yes — full scan** |
+| Base 8, no IR | yes | yes (1500 wide; framing heuristics misjudge pitch) | not yet |
+| Base 4, no IR | yes | yes (1000 wide) | not yet |
+| Base 4, IR | yes | yes (`--linewidth 4000`, IR lane split correctly) | not yet |
+
+The other modes' live replays should behave like Base 16 (same protocol,
+different parameter bytes) but have not been run. Framing/cropping
+(`find_frame_grid` pitch bounds 2600–3800, fixed-3000-row crops) is tuned
+for Base 16 and needs per-resolution scaling for Base 8/4. Modes that were
+never captured (e.g. Base 16 + IR) have no scripts; producing them takes
+either another Windows capture or the future driven backend composing
+commands from the per-mode parameter table above.
 
 ## What this unlocks / remaining gaps
 
