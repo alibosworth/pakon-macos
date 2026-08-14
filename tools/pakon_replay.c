@@ -650,10 +650,14 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
             /* Save the command bytes before the reply overwrites buf. */
             uint8_t snd[8]; int sn = n < (int)sizeof(snd) ? n : (int)sizeof(snd);
             memcpy(snd, buf, (size_t)sn);
-            /* Arm end-of-roll detection at motor-start (04 03 24 00 a0): the real
-             * continuous scan begins here; everything before is pre-scan. */
+            /* Arm end-of-roll detection at motor-start (04 03 <picm> 00 a0):
+             * the real continuous scan begins here; everything before is
+             * pre-scan. The motor PIC is 0x24 on the F-135 and 0x44 on the
+             * F-135+, so accept either — keying on 0x24 alone meant autostop
+             * silently never armed on F-135+ scripts. */
             if (autostop && !scan_armed && sn >= 5 &&
-                snd[0] == 0x04 && snd[1] == 0x03 && snd[2] == 0x24 &&
+                snd[0] == 0x04 && snd[1] == 0x03 &&
+                (snd[2] == AD_PICM || snd[2] == AD_PICM_PLUS) &&
                 snd[3] == 0x00 && snd[4] == 0xa0) {
                 scan_armed = 1;
                 printf("  [autostop] motor started at read %lu -> arming end-of-roll\n",
