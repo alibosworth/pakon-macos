@@ -57,6 +57,19 @@ static void hex(const char *tag, const uint8_t *b, size_t n)
         printf(" %02x", b[i]);
 }
 
+/* First Ctrl-C during a motor-running phase (--scan replay, --advance):
+ * finish cleanly (captured teardown / motor stop writes) instead of dying
+ * with the drive engaged. The handler resets to default so a second Ctrl-C
+ * kills immediately. */
+static volatile sig_atomic_t scan_interrupted;
+
+static void scan_sigint_handler(int signum)
+{
+    (void)signum;
+    scan_interrupted = 1;
+    signal(SIGINT, SIG_DFL);
+}
+
 static int do_open(unsigned timeout)
 {
     pakon_ctx *ctx = NULL;
@@ -191,28 +204,31 @@ static int hexbytes(const char *s, uint8_t *out, size_t max);
  * the motor running for `seconds`, then sends the captured stop pattern
  * (disengage + reg9 speed writes). Works on both models: the motor PIC
  * address is probed (0x44 Plus, 0x24 non-plus), same probe the OEM uses. */
-static int advance_send(pakon_dev *dev, const uint8_t *frame, size_t frame_len,
-                      unsigned timeout)
+/* Motor-running phases must survive Ctrl-C: the first SIGINT skips the rest
+ * of the run and falls through to the stop writes instead of killing the
+ * process with the drive engaged. Shared with the --scan handler. */
+static int advance_frame(pakon_dev *dev, uint8_t frame_type,
+                         const uint8_t *frame_data, size_t data_len,
+                         unsigned timeout)
 {
-    pakon_packet cmd, reply;
-    pakon_packet_build(&cmd, frame[0], frame + 2, frame[1]);
-    (void)frame_len;
-    return pakon_cmd(dev, &cmd, &reply, timeout) == PAKON_OK ? 0 : 1;
+    pakon_packet reply;
+    return pakon_cmd_raw(dev, frame_type, frame_data, data_len, &reply,
+                         timeout) == PAKON_OK ? 0 : 1;
 }
 
 static int timed_advance_on(pakon_dev *dev, unsigned timeout, unsigned seconds)
 {
-    /* Find the motor PIC: status 0 = present. */
+    /* PIC traffic only flows after the bridge is opened; on a fresh power
+     * session the probes below would otherwise all time out. Reply timeouts
+     * from the open itself are normal (first-open-only replies). */
+    pakon_bridge_open(dev, timeout);
+
     uint8_t picm_addr = 0;
-    const uint8_t candidates[] = {0x44, 0x24};
-    for (size_t i = 0; i < sizeof(candidates); i++) {
-        uint8_t probe[5] = {0x04, 0x03, candidates[i], 0x00, 0x00};
-        pakon_packet cmd, reply;
-        pakon_packet_build(&cmd, probe[0], probe + 2, probe[1]);
-        if (pakon_cmd(dev, &cmd, &reply, timeout) == PAKON_OK &&
-            reply.count >= 2 && reply.data[0] == candidates[i] &&
-            reply.data[1] == 0) {
-            picm_addr = candidates[i];
+    const uint8_t motor_candidates[] = {AD_PICM_PLUS, AD_PICM};
+    for (size_t i = 0; i < sizeof(motor_candidates); i++) {
+        if (pakon_probe_pic(dev, motor_candidates[i], NULL, timeout) ==
+            PAKON_PIC_PRESENT) {
+            picm_addr = motor_candidates[i];
             break;
         }
     }
@@ -221,35 +237,48 @@ static int timed_advance_on(pakon_dev *dev, unsigned timeout, unsigned seconds)
         return 1;
     }
     printf("advance: motor PIC at 0x%02x (%s), running transport for %us\n",
-           picm_addr, picm_addr == 0x44 ? "F-135+" : "F-135", seconds);
+           picm_addr, picm_addr == AD_PICM_PLUS ? "F-135+" : "F-135", seconds);
 
-    /* Captured advance block (see docs/F135_PLUS_CAPTURES.md). */
-    uint8_t motor_cal[]  = {0x02, 0x05, picm_addr, 0x02, 0xa5, 0x7e, 0x64};
-    uint8_t engage[]     = {0x04, 0x03, picm_addr, 0x00, 0xa0};
-    uint8_t speed[]      = {0x02, 0x06, picm_addr, 0x03, 0x82, 0x00, 0x63, 0x00};
-    uint8_t poll[]       = {0x03, 0x01, picm_addr};
-    uint8_t speed_idle[] = {0x02, 0x06, picm_addr, 0x03, 0x82, 0x00, 0x60, 0x00};
-    uint8_t disengage[]  = {0x04, 0x03, picm_addr, 0x00, 0xa2};
-    uint8_t stop_a[]     = {0x02, 0x06, picm_addr, 0x03, 0x82, 0x09, 0x17, 0x02};
-    uint8_t stop_b[]     = {0x02, 0x06, picm_addr, 0x03, 0x82, 0x09, 0x17, 0x00};
+    /* Captured advance block (see docs/F135_PLUS_CAPTURES.md). Frame data is
+     * [addr, payload_len, cmd, payload...]; the type byte selects CMD/WRITE/
+     * READ_STATUS per the confirmed wire format. */
+    const uint8_t motor_cal[]  = {picm_addr, 0x02, 0xa5, 0x7e, 0x64};
+    const uint8_t engage[]     = {picm_addr, 0x00, 0xa0};
+    const uint8_t speed_run[]  = {picm_addr, 0x03, 0x82, 0x00, 0x63, 0x00};
+    const uint8_t status_poll[] = {picm_addr};
+    const uint8_t speed_idle[] = {picm_addr, 0x03, 0x82, 0x00, 0x60, 0x00};
+    const uint8_t disengage[]  = {picm_addr, 0x00, 0xa2};
+    const uint8_t stop_a[]     = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x02};
+    const uint8_t stop_b[]     = {picm_addr, 0x03, 0x82, 0x09, 0x17, 0x00};
+
+    /* From here the motor runs: catch the first Ctrl-C so the stop writes
+     * below always execute (a second Ctrl-C kills as usual). */
+    scan_interrupted = 0;
+    void (*previous_sigint)(int) = signal(SIGINT, scan_sigint_handler);
 
     int errs = 0;
-    errs += advance_send(dev, motor_cal, sizeof(motor_cal), timeout);
-    errs += advance_send(dev, engage, sizeof(engage), timeout);
-    errs += advance_send(dev, speed, sizeof(speed), timeout);
-    for (unsigned s = 0; s < seconds; s++) {
+    errs += advance_frame(dev, PH_WRITE, motor_cal, sizeof(motor_cal), timeout);
+    errs += advance_frame(dev, PH_CMD, engage, sizeof(engage), timeout);
+    errs += advance_frame(dev, PH_WRITE, speed_run, sizeof(speed_run), timeout);
+    for (unsigned elapsed = 0; elapsed < seconds && !scan_interrupted;
+         elapsed++) {
         struct timespec pause = {1, 0};
         nanosleep(&pause, NULL);
-        advance_send(dev, poll, sizeof(poll), timeout);  /* keep-alive */
+        /* keep-alive */
+        advance_frame(dev, PH_READ_STATUS, status_poll, sizeof(status_poll),
+                      timeout);
     }
+    if (scan_interrupted)
+        printf("advance: interrupted — stopping the motor before exit\n");
     /* Stop: reg0 back to its idle value FIRST (the run/stop state lives
      * there; 0xA2 only releases the drive), then the captured stop tail. */
-    errs += advance_send(dev, speed_idle, sizeof(speed_idle), timeout);
-    errs += advance_send(dev, disengage, sizeof(disengage), timeout);
-    errs += advance_send(dev, stop_a, sizeof(stop_a), timeout);
-    errs += advance_send(dev, stop_b, sizeof(stop_b), timeout);
+    errs += advance_frame(dev, PH_WRITE, speed_idle, sizeof(speed_idle), timeout);
+    errs += advance_frame(dev, PH_CMD, disengage, sizeof(disengage), timeout);
+    errs += advance_frame(dev, PH_WRITE, stop_a, sizeof(stop_a), timeout);
+    errs += advance_frame(dev, PH_WRITE, stop_b, sizeof(stop_b), timeout);
+    signal(SIGINT, previous_sigint);
     printf("advance: done (%d command errors)\n", errs);
-    return errs ? 1 : 0;
+    return (errs || scan_interrupted) ? 1 : 0;
 }
 
 static int do_timed_advance(unsigned timeout, unsigned seconds)
@@ -343,13 +372,8 @@ static int do_advance(const char *script, unsigned timeout, unsigned limit_sec,
         uint8_t picm_addr = AD_PICM;
         const uint8_t motor_candidates[] = {AD_PICM_PLUS, AD_PICM};
         for (size_t i = 0; i < sizeof(motor_candidates); i++) {
-            uint8_t probe_data[] = {motor_candidates[i], 0x00, 0x00};
-            pakon_packet probe_pkt, probe_reply;
-            pakon_packet_build(&probe_pkt, 0x04, probe_data, 3);
-            if (pakon_cmd(dev, &probe_pkt, &probe_reply, timeout) == PAKON_OK &&
-                probe_reply.count >= 2 &&
-                probe_reply.data[0] == motor_candidates[i] &&
-                probe_reply.data[1] == 0) {
+            if (pakon_probe_pic(dev, motor_candidates[i], NULL, timeout) ==
+                PAKON_PIC_PRESENT) {
                 picm_addr = motor_candidates[i];
                 break;
             }
@@ -422,17 +446,6 @@ static int do_advance(const char *script, unsigned timeout, unsigned limit_sec,
 /* ---- Phase 5: replay a full scan operation script (.pakscan) ---- */
 
 #define SCAN_IMG_TIMEOUT_MS 5000
-
-/* First Ctrl-C during --scan: finish cleanly via the captured teardown.
- * The handler resets to default so a second Ctrl-C kills immediately. */
-static volatile sig_atomic_t scan_interrupted;
-
-static void scan_sigint_handler(int signum)
-{
-    (void)signum;
-    scan_interrupted = 1;
-    signal(SIGINT, SIG_DFL);
-}
 
 /* Parse a hex byte string into out[max]; returns count or -1. */
 static int hexbytes(const char *s, uint8_t *out, size_t max)
@@ -532,7 +545,9 @@ static void drain_image(pakon_dev *dev, FILE *img,
     pakon_packet_build(&poll_pkt, 0x03, poll_data, 1);
 
     uint8_t buf[20480];
-    for (;;) {
+    /* Honor Ctrl-C here too: the drain can outlive the script by minutes,
+     * and the caller's teardown must still run afterwards. */
+    while (!scan_interrupted) {
         pakon_result r = pakon_cmd(dev, &poll_pkt, &poll_reply, timeout);
         if (r != PAKON_OK) (*errs)++;
         (*ncmd)++;
@@ -705,6 +720,7 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
         }
     }
 
+    int teardown_ran = 0;
     if (!rc && stop_early) {
         /* We broke out mid-script (end-of-roll or Ctrl-C), so the script's own
          * teardown tail was skipped. Replay it now to stop the engines and
@@ -712,9 +728,19 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
         printf("  [teardown] replaying captured teardown (stop + engine reset)...\n");
         long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
         printf("  [teardown] %ld commands replayed\n", td);
+        teardown_ran = 1;
     } else if (!rc && drain) {
         printf("  [drain] script exhausted, draining 0x86 until scanner signals done...\n");
         drain_image(dev, img, &ncmd, &nimg, &img_bytes, &errs, timeout);
+        if (scan_interrupted) {
+            /* Ctrl-C landed during the drain, after the script completed —
+             * still stop the engines before exiting. */
+            printf("  [interrupt] Ctrl-C during drain: replaying captured "
+                   "teardown...\n");
+            long td = sm_replay_teardown(dev, script, timeout, &ncmd, &errs);
+            printf("  [teardown] %ld commands replayed\n", td);
+            teardown_ran = 1;
+        }
     }
 
     signal(SIGINT, previous_sigint);
@@ -723,10 +749,17 @@ static int do_scan(const char *script, const char *image_path, unsigned timeout,
     pakon_usb_exit(ctx);
     fclose(fp);
     fclose(img);
+    /* An interrupted scan produced a truncated raw: never report success, or
+     * shell chains and the web layer will decode the partial file as a
+     * finished scan. */
+    if (scan_interrupted && !rc)
+        rc = 1;
     printf("\nscan replay done: %lu commands, %lu image reads, %llu image bytes "
            "-> %s (%lu transfer errors)%s\n",
            ncmd, nimg, img_bytes, image_path, errs,
-           scan_interrupted ? " [interrupted by Ctrl-C, teardown sent]" : "");
+           !scan_interrupted ? ""
+           : teardown_ran ? " [interrupted by Ctrl-C, teardown sent]"
+                          : " [interrupted by Ctrl-C]");
     return rc;
 }
 
@@ -1474,10 +1507,22 @@ int main(int argc, char **argv)
     if (want_calibrate)
         return do_calibrate(timeout, (size_t)cal_lines, cal_verbose, cal_prelude,
                             (unsigned)cal_exposure);
-    if (advance_file)
+    if (advance_file) {
+        if (want_advance_run)
+            fprintf(stderr, "note: --advance is ignored with an advance "
+                    "script (that mode already drives the film)\n");
         return do_advance(advance_file, timeout, limit_sec, steps_count);
-    if (scan_sm_file)
-        return do_scan_sm(scan_sm_file, image_path, timeout, max_mb);
+    }
+    if (scan_sm_file) {
+        int rc = do_scan_sm(scan_sm_file, image_path, timeout, max_mb);
+        if (want_advance_run) {
+            printf("\n[advance] pushing the film out of the transport...\n");
+            int advance_rc = do_timed_advance(timeout, advance_seconds);
+            if (!rc)
+                rc = advance_rc;
+        }
+        return rc;
+    }
     if (scan_file) {
         int rc = do_scan(scan_file, image_path, timeout, drain, trace_status,
                          autostop);
