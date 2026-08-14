@@ -244,8 +244,10 @@ captured teardown (motor and acquisition off) before exiting.
 Frame-positioned advancing also works
 (`pakon_replay resources/f135plus/advance.pakscan`); both it and
 `--advance` probe the motor controller so the same commands work on either
-model. Everything else F-135+ (protocol differences, stream format,
-per-mode parameters) is in `docs/F135_PLUS_CAPTURES.md`.
+model. One current gap: the **web UI decodes the F-135 layout only** (its
+decoder assumes 8000-sample rows), so F-135+ raws must be decoded with the
+command line above for now. Everything else F-135+ (protocol differences,
+stream format, per-mode parameters) is in `docs/F135_PLUS_CAPTURES.md`.
 
 ### Debug logging
 
