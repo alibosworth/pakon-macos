@@ -17,10 +17,11 @@ pulled a full 210 MB strip → `pakon_image.py --linewidth 6000 --no-ir-lane
 verified for Base 16 no-IR only (other modes' scripts convert and their
 captured streams decode, but haven't been replayed on hardware); framing
 heuristics (`find_frame_grid` pitch bounds, fixed-3000 crop) are tuned for
-Base 16 and misframe Base 8/4; the web service still hardcodes the F-135
-layout (8000-sample rows, F-135 scan script) and mis-decodes F-135+ raws; open-loop replay skips the OEM's film-exit
+Base 16 and misframe Base 8/4; open-loop replay skips the OEM's film-exit
 polling (eject workaround in F135_PLUS_CAPTURES §6); no scripts exist for
-uncaptured modes (e.g. Base 16 + IR) until a driven backend composes them._
+uncaptured modes (e.g. Base 16 + IR) until a driven backend composes them. The
+web service now detects the model and auto-detects each raw's row layout, so
+its two-stage flow works on the F-135+ as well._
 
 _Last updated: 2026-06-01 (imaging + web session). DONE: recovered the OEM C-41
 inversion (ColNeg log LUT `out=3500*log10(16383/in)` + per-channel Dmin
