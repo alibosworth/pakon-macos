@@ -737,8 +737,8 @@ def main():
     width = lw // 4 if args.ir_lane else lw // 3
     nvis = width * 3
     chans = {"r": img[:, 0:nvis:3], "g": img[:, 1:nvis:3], "b": img[:, 2:nvis:3]}
-    # trailing IR line (detected + discarded) — absent without an IR lane
-    ir = img[:, nvis:nvis + width] if args.ir_lane else None
+    # The trailing lw//4 samples per row (when --ir-lane) are the IR/Digital
+    # ICE line; nothing downstream consumes it yet, so it is simply not sliced.
     full = float(max(chans["r"][::997].max(), chans["g"][::997].max(),
                      chans["b"][::997].max())) or 1.0
 
