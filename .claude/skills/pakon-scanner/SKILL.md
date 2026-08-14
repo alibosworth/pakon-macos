@@ -157,8 +157,8 @@ propagates to test binaries with correct search dirs.
   extract the captured FX2 control-transfer sequence to a `.pakfw` script
   (`analyze_capture.py --extract-firmware`) and replay it verbatim
   (`pakon_usb_load_firmware` → `pakon_probe --load-firmware resources/f135.pakfw`), then
-  wait for re-enumeration. `.pakfw` holds Kodak bytes → gitignored, regenerate
-  from a capture.
+  wait for re-enumeration. One is COMMITTED at `resources/f135.pakfw`
+  (works for F-135 and F-135+; see firmware/README.md for provenance).
 - **Testing caveat:** the cold device must be on the HOST, not held by the VM
   (disable the VirtualBox USB filter / shut down the VM first).
 - **Phase 5 scan replay IMPLEMENTED (untested on hardware).** Flow mapped:

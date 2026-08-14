@@ -631,7 +631,7 @@ cold=`0F05:F235`/warm=`0F05:F135`; `analyze_capture.py --extract-firmware
 f135.pakfw` extracts the captured FX2 sequence; `pakon_usb_load_firmware`
 replays it and waits for re-enumeration. Confirmed working on the box:
 `--load-firmware resources/f135.pakfw` brought f235→f135, then `--open` reached Idle.
-(`.pakfw` gitignored — regenerate from a capture. Free the device from the VM
+(a `.pakfw` is committed at `resources/f135.pakfw`. Free the device from the VM
 first: shut down the VM / drop the 0f05 USB filter, replug, `lsusb`→0f05:f235.)
 
 To repeat the working test:
