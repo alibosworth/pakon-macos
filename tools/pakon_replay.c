@@ -126,34 +126,24 @@ static int do_open(unsigned timeout)
         }
     }
 
-    /* Model detection: -1 = probe errored, else the reply status byte
-     * (0 = present/acked, 1 = absent). */
-    int probe_status[sizeof(PIC_PROBES) / sizeof(PIC_PROBES[0])];
+    /* Model detection via the shared probe primitive. A probe ERROR (transport
+     * failure, malformed reply, or a non-ack error status like bus-error) is
+     * distinct from ABSENT: it is a fault, never evidence about the model. */
+    pakon_pic_state probe_state[sizeof(PIC_PROBES) / sizeof(PIC_PROBES[0])];
     size_t nprobes = sizeof(PIC_PROBES) / sizeof(PIC_PROBES[0]);
     for (size_t i = 0; i < nprobes; i++) {
-        uint8_t out[5] = {0x04, 0x03, PIC_PROBES[i].addr, 0x00, 0x00};
-        pakon_packet cmd, reply;
-        pakon_packet_build(&cmd, out[0], out + 2, out[1]);
-        probe_status[i] = -1;
-
-        r = pakon_cmd(dev, &cmd, &reply, timeout);
+        uint8_t status = PS_NONE;
+        probe_state[i] = pakon_probe_pic(dev, PIC_PROBES[i].addr, &status,
+                                         timeout);
         printf("[probe %-14s] ", PIC_PROBES[i].label);
-        hex("send", out, sizeof(out));
-        if (r != PAKON_OK) {
-            printf("  -> ERROR %s\n", pakon_result_str(r));
+        switch (probe_state[i]) {
+        case PAKON_PIC_PRESENT: printf("present\n"); break;
+        case PAKON_PIC_ABSENT:  printf("absent\n"); break;
+        case PAKON_PIC_ERROR:
+            printf("ERROR (%s)\n", status == PS_NONE
+                   ? "no/malformed reply" : pakon_status_str(status));
             failures++;
-            continue;
-        }
-        uint8_t got[PAKON_PACKET_SIZE];
-        size_t glen = 0;
-        pakon_packet_serialize(&reply, got, sizeof(got), &glen);
-        hex("  recv", got, glen);
-        if (glen >= 4 && got[2] == PIC_PROBES[i].addr) {
-            probe_status[i] = got[3];
-            printf("  %s\n", got[3] == 0 ? "present" : "absent");
-        } else {
-            printf("  UNEXPECTED REPLY\n");
-            failures++;
+            break;
         }
     }
 
@@ -164,19 +154,26 @@ static int do_open(unsigned timeout)
     /* PIC_PROBES order: [0]=PICM_PLUS 0x44, [1]=BOOT_PICM_PLUS 0x46,
      * [2]=PICM 0x24. Exactly one of the motor PICs answers per model. */
     const char *model = NULL;
-    if (probe_status[0] == 0 && probe_status[2] != 0)
+    if (probe_state[0] == PAKON_PIC_PRESENT &&
+        probe_state[2] == PAKON_PIC_ABSENT)
         model = "F-135+ (Plus PICs at 0x40/0x44)";
-    else if (probe_status[2] == 0 && probe_status[0] != 0)
+    else if (probe_state[2] == PAKON_PIC_PRESENT &&
+             probe_state[0] == PAKON_PIC_ABSENT)
         model = "F-135 (PICs at 0x20/0x24)";
-    if (probe_status[1] == 0)
-        printf("\nWARNING: PICM boot PIC (0x46) answered — device in "
-               "firmware-update state?\n");
+    if (probe_state[1] == PAKON_PIC_PRESENT) {
+        /* The boot PIC answering means the motor PIC is stuck in its
+         * bootloader (firmware-update state) — not safe to drive. */
+        printf("\nERROR: PICM boot PIC (0x46) answered — device in "
+               "firmware-update state, not driving it\n");
+        failures++;
+    }
 
     if (model)
         printf("\nmodel detected: %s\n", model);
     else {
-        printf("\nmodel detection FAILED (0x44 status %d, 0x24 status %d)\n",
-               probe_status[0], probe_status[2]);
+        printf("\nmodel detection FAILED (probes: PLUS=%d plain=%d; "
+               "0=present 1=absent 2=error)\n",
+               probe_state[0], probe_state[2]);
         failures++;
     }
 
